@@ -18,17 +18,20 @@
 package org.apache.flink.kubernetes.operator.metrics;
 
 import org.apache.flink.annotation.VisibleForTesting;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
-import org.apache.flink.kubernetes.operator.crd.AbstractFlinkResource;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.FlinkSessionJob;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
+import org.apache.flink.kubernetes.operator.api.FlinkStateSnapshot;
 import org.apache.flink.kubernetes.operator.metrics.lifecycle.LifecycleMetrics;
+
+import io.fabric8.kubernetes.client.CustomResource;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /** Metric manager for Operator managed custom resources. */
-public class MetricManager<CR extends AbstractFlinkResource<?, ?>> {
+public class MetricManager<CR extends CustomResource<?, ?>> {
     private final List<CustomResourceMetrics<CR>> registeredMetrics = new ArrayList<>();
 
     public void onUpdate(CR cr) {
@@ -44,56 +47,62 @@ public class MetricManager<CR extends AbstractFlinkResource<?, ?>> {
     }
 
     public static MetricManager<FlinkDeployment> createFlinkDeploymentMetricManager(
-            FlinkConfigManager configManager, KubernetesOperatorMetricGroup metricGroup) {
+            Configuration conf, KubernetesOperatorMetricGroup metricGroup) {
         MetricManager<FlinkDeployment> metricManager = new MetricManager<>();
-        registerFlinkDeploymentMetrics(configManager, metricGroup, metricManager);
-        registerLifecycleMetrics(configManager, metricGroup, metricManager);
+        registerFlinkDeploymentMetrics(conf, metricGroup, metricManager);
+        registerLifecycleMetrics(conf, metricGroup, metricManager);
         return metricManager;
     }
 
     public static MetricManager<FlinkSessionJob> createFlinkSessionJobMetricManager(
-            FlinkConfigManager configManager, KubernetesOperatorMetricGroup metricGroup) {
+            Configuration conf, KubernetesOperatorMetricGroup metricGroup) {
         MetricManager<FlinkSessionJob> metricManager = new MetricManager<>();
-        registerFlinkSessionJobMetrics(configManager, metricGroup, metricManager);
-        registerLifecycleMetrics(configManager, metricGroup, metricManager);
+        registerFlinkSessionJobMetrics(conf, metricGroup, metricManager);
+        registerLifecycleMetrics(conf, metricGroup, metricManager);
+        return metricManager;
+    }
+
+    public static MetricManager<FlinkStateSnapshot> createFlinkStateSnapshotMetricManager(
+            Configuration conf, KubernetesOperatorMetricGroup metricGroup) {
+        MetricManager<FlinkStateSnapshot> metricManager = new MetricManager<>();
+        registerFlinkStateSnapshotMetrics(conf, metricGroup, metricManager);
         return metricManager;
     }
 
     private static void registerFlinkDeploymentMetrics(
-            FlinkConfigManager configManager,
+            Configuration conf,
             KubernetesOperatorMetricGroup metricGroup,
             MetricManager<FlinkDeployment> metricManager) {
-        if (configManager
-                .getDefaultConfig()
-                .get(KubernetesOperatorMetricOptions.OPERATOR_RESOURCE_METRICS_ENABLED)) {
-            metricManager.register(
-                    new FlinkDeploymentMetrics(metricGroup, configManager.getDefaultConfig()));
+        if (conf.get(KubernetesOperatorMetricOptions.OPERATOR_RESOURCE_METRICS_ENABLED)) {
+            metricManager.register(new FlinkDeploymentMetrics(metricGroup, conf));
         }
     }
 
     private static void registerFlinkSessionJobMetrics(
-            FlinkConfigManager configManager,
+            Configuration conf,
             KubernetesOperatorMetricGroup metricGroup,
             MetricManager<FlinkSessionJob> metricManager) {
-        if (configManager
-                .getDefaultConfig()
-                .get(KubernetesOperatorMetricOptions.OPERATOR_RESOURCE_METRICS_ENABLED)) {
-            metricManager.register(
-                    new FlinkSessionJobMetrics(metricGroup, configManager.getDefaultConfig()));
+        if (conf.get(KubernetesOperatorMetricOptions.OPERATOR_RESOURCE_METRICS_ENABLED)) {
+            metricManager.register(new FlinkSessionJobMetrics(metricGroup, conf));
+        }
+    }
+
+    private static void registerFlinkStateSnapshotMetrics(
+            Configuration conf,
+            KubernetesOperatorMetricGroup metricGroup,
+            MetricManager<FlinkStateSnapshot> metricManager) {
+        if (conf.get(KubernetesOperatorMetricOptions.OPERATOR_RESOURCE_METRICS_ENABLED)) {
+            metricManager.register(new FlinkStateSnapshotMetrics(metricGroup, conf));
         }
     }
 
     private static <CR extends AbstractFlinkResource<?, ?>> void registerLifecycleMetrics(
-            FlinkConfigManager configManager,
+            Configuration conf,
             KubernetesOperatorMetricGroup metricGroup,
             MetricManager<CR> metricManager) {
-        if (configManager
-                        .getDefaultConfig()
-                        .get(KubernetesOperatorMetricOptions.OPERATOR_RESOURCE_METRICS_ENABLED)
-                && configManager
-                        .getDefaultConfig()
-                        .get(KubernetesOperatorMetricOptions.OPERATOR_LIFECYCLE_METRICS_ENABLED)) {
-            metricManager.register(new LifecycleMetrics<>(configManager, metricGroup));
+        if (conf.get(KubernetesOperatorMetricOptions.OPERATOR_RESOURCE_METRICS_ENABLED)
+                && conf.get(KubernetesOperatorMetricOptions.OPERATOR_LIFECYCLE_METRICS_ENABLED)) {
+            metricManager.register(new LifecycleMetrics<>(conf, metricGroup));
         }
     }
 

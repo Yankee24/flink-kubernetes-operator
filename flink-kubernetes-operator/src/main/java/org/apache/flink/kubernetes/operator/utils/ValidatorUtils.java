@@ -19,7 +19,9 @@ package org.apache.flink.kubernetes.operator.utils;
 
 import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.core.plugin.PluginUtils;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
+import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.validation.DefaultValidator;
 import org.apache.flink.kubernetes.operator.validation.FlinkResourceValidator;
 
@@ -35,11 +37,12 @@ public final class ValidatorUtils {
     private static final Logger LOG = LoggerFactory.getLogger(FlinkUtils.class);
 
     public static Set<FlinkResourceValidator> discoverValidators(FlinkConfigManager configManager) {
+        var conf = configManager.getDefaultConfig();
         Set<FlinkResourceValidator> resourceValidators = new HashSet<>();
         DefaultValidator defaultValidator = new DefaultValidator(configManager);
-        defaultValidator.configure(configManager.getDefaultConfig());
+        defaultValidator.configure(conf);
         resourceValidators.add(defaultValidator);
-        PluginUtils.createPluginManagerFromRootFolder(configManager.getDefaultConfig())
+        PluginUtils.createPluginManagerFromRootFolder(conf)
                 .load(FlinkResourceValidator.class)
                 .forEachRemaining(
                         validator -> {
@@ -50,9 +53,25 @@ public final class ValidatorUtils {
                                                     ConfigConstants.ENV_FLINK_PLUGINS_DIR,
                                                     ConfigConstants.DEFAULT_FLINK_PLUGINS_DIRS),
                                     validator.getClass().getName());
-                            validator.configure(configManager.getDefaultConfig());
+                            validator.configure(conf);
                             resourceValidators.add(validator);
                         });
         return resourceValidators;
+    }
+
+    public static boolean validateSupportedVersion(
+            FlinkResourceContext<?> ctx, EventRecorder eventRecorder) {
+        var version = ctx.getFlinkVersion();
+        if (!FlinkVersion.isSupported(version)) {
+            eventRecorder.triggerEvent(
+                    ctx.getResource(),
+                    EventRecorder.Type.Warning,
+                    EventRecorder.Reason.UnsupportedFlinkVersion,
+                    EventRecorder.Component.Operator,
+                    "Flink version " + version + " is not supported by this operator version",
+                    ctx.getJosdkContext().getClient());
+            return false;
+        }
+        return true;
     }
 }

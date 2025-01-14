@@ -18,18 +18,20 @@
 package org.apache.flink.kubernetes.operator.observer.deployment;
 
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.kubernetes.operator.OperatorTestBase;
 import org.apache.flink.kubernetes.operator.TestUtils;
-import org.apache.flink.kubernetes.operator.TestingFlinkService;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
+import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatus;
-import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
+import org.apache.flink.kubernetes.operator.observer.TestObserverAdapter;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
-import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.FlinkUtils;
 
+import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
-import org.junit.jupiter.api.BeforeEach;
+import lombok.Getter;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -38,17 +40,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /** {@link SessionObserver} unit tests. */
-public class SessionObserverTest {
-    private final Context<FlinkDeployment> readyContext =
-            TestUtils.createContextWithReadyJobManagerDeployment();
-    private final FlinkConfigManager configManager = new FlinkConfigManager(new Configuration());
-    private final TestingFlinkService flinkService = new TestingFlinkService();
-    private SessionObserver observer;
+@EnableKubernetesMockClient(crud = true)
+public class SessionObserverTest extends OperatorTestBase {
 
-    @BeforeEach
-    public void before() {
-        var eventRecorder = new EventRecorder(null, (r, e) -> {});
-        observer = new SessionObserver(flinkService, configManager, eventRecorder);
+    @Getter private KubernetesClient kubernetesClient;
+
+    private final Context<FlinkDeployment> readyContext =
+            TestUtils.createContextWithReadyJobManagerDeployment(kubernetesClient);
+    private TestObserverAdapter<FlinkDeployment> observer;
+
+    @Override
+    public void setup() {
+        observer = new TestObserverAdapter<>(this, new SessionObserver(eventRecorder));
     }
 
     @Test
@@ -103,7 +106,7 @@ public class SessionObserverTest {
         var kubernetesDeployment = TestUtils.createDeployment(true);
         kubernetesDeployment.getMetadata().setAnnotations(new HashMap<>());
 
-        var context = TestUtils.createContextWithDeployment(kubernetesDeployment);
+        var context = TestUtils.createContextWithDeployment(kubernetesDeployment, kubernetesClient);
 
         FlinkDeployment deployment = TestUtils.buildSessionCluster();
         deployment.getMetadata().setGeneration(123L);
@@ -149,7 +152,7 @@ public class SessionObserverTest {
                 status.getJobManagerDeploymentStatus());
 
         var specWithMeta = status.getReconciliationStatus().deserializeLastReconciledSpecWithMeta();
-        assertEquals(321L, specWithMeta.f1.getMetadata().getGeneration());
-        assertEquals("1", specWithMeta.f0.getFlinkConfiguration().get("k"));
+        assertEquals(321L, status.getObservedGeneration());
+        assertEquals("1", specWithMeta.getSpec().getFlinkConfiguration().get("k"));
     }
 }

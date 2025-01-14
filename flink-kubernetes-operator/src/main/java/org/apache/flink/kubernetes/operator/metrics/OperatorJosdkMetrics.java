@@ -17,10 +17,10 @@
 
 package org.apache.flink.kubernetes.operator.metrics;
 
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
+import org.apache.flink.kubernetes.operator.api.FlinkStateSnapshot;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
-import org.apache.flink.kubernetes.operator.crd.AbstractFlinkResource;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.FlinkSessionJob;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.Histogram;
 import org.apache.flink.metrics.MetricGroup;
@@ -28,6 +28,7 @@ import org.apache.flink.runtime.metrics.MetricRegistry;
 import org.apache.flink.util.clock.Clock;
 import org.apache.flink.util.clock.SystemClock;
 
+import io.fabric8.kubernetes.client.CustomResource;
 import io.javaoperatorsdk.operator.api.monitoring.Metrics;
 import io.javaoperatorsdk.operator.api.reconciler.Constants;
 import io.javaoperatorsdk.operator.api.reconciler.RetryInfo;
@@ -35,7 +36,6 @@ import io.javaoperatorsdk.operator.processing.GroupVersionKind;
 import io.javaoperatorsdk.operator.processing.event.Event;
 import io.javaoperatorsdk.operator.processing.event.ResourceID;
 import io.javaoperatorsdk.operator.processing.event.source.controller.ResourceEvent;
-import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -49,7 +49,6 @@ import java.util.concurrent.TimeUnit;
  * Implementation of {@link Metrics} to monitor and forward JOSDK metrics to {@link MetricRegistry}.
  */
 public class OperatorJosdkMetrics implements Metrics {
-
     private static final String OPERATOR_SDK_GROUP = "JOSDK";
     private static final String RECONCILIATION = "Reconciliation";
     private static final String RESOURCE = "Resource";
@@ -180,7 +179,7 @@ public class OperatorJosdkMetrics implements Metrics {
 
     private KubernetesResourceNamespaceMetricGroup getResourceNsMg(
             ResourceID resourceID, Map<String, Object> metadata) {
-        Class<? extends AbstractFlinkResource<?, ?>> resourceClass =
+        Class<? extends CustomResource<?, ?>> resourceClass =
                 getResourceClass(metadata)
                         .orElseThrow(
                                 () ->
@@ -196,8 +195,7 @@ public class OperatorJosdkMetrics implements Metrics {
                                 rid.getNamespace().orElse("default")));
     }
 
-    @NotNull
-    private Optional<Class<? extends AbstractFlinkResource<?, ?>>> getResourceClass(
+    private Optional<Class<? extends CustomResource<?, ?>>> getResourceClass(
             Map<String, Object> metadata) {
         var resourceGvk = (GroupVersionKind) metadata.get(Constants.RESOURCE_GVK_KEY);
 
@@ -205,12 +203,14 @@ public class OperatorJosdkMetrics implements Metrics {
             return Optional.empty();
         }
 
-        Class<? extends AbstractFlinkResource<?, ?>> resourceClass;
+        Class<? extends CustomResource<?, ?>> resourceClass;
 
-        if (resourceGvk.kind.equals(FlinkDeployment.class.getSimpleName())) {
+        if (resourceGvk.getKind().equals(FlinkDeployment.class.getSimpleName())) {
             resourceClass = FlinkDeployment.class;
-        } else if (resourceGvk.kind.equals(FlinkSessionJob.class.getSimpleName())) {
+        } else if (resourceGvk.getKind().equals(FlinkSessionJob.class.getSimpleName())) {
             resourceClass = FlinkSessionJob.class;
+        } else if (resourceGvk.getKind().equals(FlinkStateSnapshot.class.getSimpleName())) {
+            resourceClass = FlinkStateSnapshot.class;
         } else {
             return Optional.empty();
         }
@@ -224,7 +224,7 @@ public class OperatorJosdkMetrics implements Metrics {
                 resourceID,
                 rid ->
                         getResourceNsMg(rid, metadata)
-                                .createResourceNamespaceGroup(
+                                .createResourceGroup(
                                         configManager.getDefaultConfig(), rid.getName()));
     }
 }

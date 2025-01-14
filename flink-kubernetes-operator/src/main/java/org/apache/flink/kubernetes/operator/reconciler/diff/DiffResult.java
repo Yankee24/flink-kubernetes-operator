@@ -18,13 +18,17 @@
 package org.apache.flink.kubernetes.operator.reconciler.diff;
 
 import org.apache.flink.annotation.Experimental;
+import org.apache.flink.kubernetes.operator.api.diff.DiffType;
+import org.apache.flink.kubernetes.operator.api.diff.Diffable;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.fabric8.zjsonpatch.JsonDiff;
 import lombok.Getter;
 import lombok.NonNull;
-import org.apache.commons.lang3.builder.ToStringBuilder;
-import org.apache.commons.lang3.builder.ToStringStyle;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * Contains a collection of the differences between two {@link Diffable} objects.
@@ -36,15 +40,18 @@ import java.util.List;
 @Getter
 public class DiffResult<T> {
     @NonNull private final List<Diff<?>> diffList;
-    @NonNull private final T left;
-    @NonNull private final T right;
+    @NonNull private final T before;
+    @NonNull private final T after;
     @NonNull private final DiffType type;
 
-    DiffResult(@NonNull T left, @NonNull T right, @NonNull List<Diff<?>> diffList) {
-        this.left = left;
-        this.right = right;
+    private static final ObjectMapper objectMapper = new ObjectMapper();
+
+    DiffResult(@NonNull T before, @NonNull T after, @NonNull List<Diff<?>> diffList) {
+        this.before = before;
+        this.after = after;
         this.diffList = diffList;
-        this.type = getSpechChangeType(diffList);
+        this.type =
+                DiffType.from(diffList.stream().map(Diff::getType).collect(Collectors.toList()));
     }
 
     public int getNumDiffs() {
@@ -57,28 +64,72 @@ public class DiffResult<T> {
             return "";
         }
 
-        final ToStringBuilder lhsBuilder =
-                new ToStringBuilder(left, ToStringStyle.SHORT_PREFIX_STYLE);
-        final ToStringBuilder rhsBuilder =
-                new ToStringBuilder(right, ToStringStyle.SHORT_PREFIX_STYLE);
+        final StringBuilder builder = new StringBuilder();
+        builder.append(before.getClass().getSimpleName()).append("[");
 
         diffList.forEach(
                 diff -> {
-                    lhsBuilder.append(diff.getFieldName(), diff.getLeft());
-                    rhsBuilder.append(diff.getFieldName(), diff.getRight());
+                    try {
+                        JsonNode diffBefore =
+                                objectMapper.readTree(
+                                        objectMapper.writeValueAsString(diff.getLeft()));
+                        JsonNode diffAfter =
+                                objectMapper.readTree(
+                                        objectMapper.writeValueAsString(diff.getRight()));
+                        JsonNode jsonDiff = JsonDiff.asJson(diffBefore, diffAfter);
+                        jsonDiff.forEach(
+                                row -> {
+                                    addField(
+                                            builder,
+                                            diffBefore,
+                                            diffAfter,
+                                            diff.getFieldName(),
+                                            row);
+                                    builder.append(", ");
+                                });
+                        builder.setLength(builder.length() - 2);
+                    } catch (Exception je) {
+                        builder.append(diff.getFieldName())
+                                .append(" : ")
+                                .append(diff.getLeft())
+                                .append(" -> ")
+                                .append(diff.getRight());
+                    }
+                    builder.append(", ");
                 });
-
-        return String.format("%s differs from %s", lhsBuilder.build(), rhsBuilder.build());
+        builder.setLength(builder.length() - 2);
+        builder.append("]");
+        return String.format("Diff: %s", builder);
     }
 
-    private static DiffType getSpechChangeType(List<Diff<?>> diffs) {
-        var type = DiffType.IGNORE;
-        for (var diff : diffs) {
-            type = DiffType.max(type, diff.getType());
-            if (type == DiffType.UPGRADE) {
-                return type;
-            }
+    private static void addField(
+            StringBuilder sb,
+            JsonNode parentBefore,
+            JsonNode parentAfter,
+            String fieldName,
+            JsonNode diff) {
+        JsonNode beforeNode = parentBefore;
+        JsonNode afterNode = parentAfter;
+        String extraPath = "";
+        if (!diff.get("path").asText().equals("/")) {
+            extraPath = diff.get("path").asText().replaceAll("/", ".");
+            beforeNode = beforeNode.at(diff.get("path").asText());
+            afterNode = afterNode.at(diff.get("path").asText());
         }
-        return type;
+        sb.append(fieldName).append(extraPath).append(" : ");
+        if ((afterNode.isNull() || afterNode.isMissingNode()) && beforeNode.asText().equals("")) {
+            sb.append("{..}");
+        } else {
+            sb.append(getText(beforeNode));
+        }
+        sb.append(" -> ").append(getText(afterNode));
+    }
+
+    private static String getText(JsonNode node) {
+        if (node.isNull() || node.isMissingNode()) {
+            return null;
+        }
+        String text = node.asText();
+        return text.equals("") ? node.toString() : text;
     }
 }

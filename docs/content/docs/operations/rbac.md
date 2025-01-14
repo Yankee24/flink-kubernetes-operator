@@ -29,10 +29,10 @@ under the License.
 To be able to deploy the operator itself and Flink jobs, we define two separate Kubernetes
 [roles](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#role-and-clusterrole).
 The former, called `flink-operator` role is used to manage the `flinkdeployments`, to create and manage the
-[JobManager](https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/flink-architecture/#jobmanager) deployment
+[JobManager](https://nightlies.apache.org/flink/flink-docs-master/docs/concepts/flink-architecture/#jobmanager) deployment
 for each Flink job and other resources like [services](https://kubernetes.io/docs/concepts/services-networking/service/).
 The latter, called the `flink` role is used by the JobManagers of the jobs to create and manage the
-[TaskManagers](https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/flink-architecture/#taskmanagers) and
+[TaskManagers](https://nightlies.apache.org/flink/flink-docs-master/docs/concepts/flink-architecture/#taskmanagers) and
 [ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/) for the job.
 
 {{< img src="/img/operations/rbac.svg" alt="Flink Operator RBAC Model" >}}
@@ -104,7 +104,7 @@ For each additional namespace that runs the Flink jobs, users need to do the fol
       name: flink
     EOF
     ```
-3. Optionally create an example Flink job in the namespace. Run the command from the root of the cloned flink-kuberntes-operator repo:
+3. Optionally create an example Flink job in the namespace. Run the command from the root of the cloned flink-kubernetes-operator repo:
     ```sh
-    kubectl -f example/basic.yaml
+    kubectl apply -f example/basic.yaml
     ```

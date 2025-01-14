@@ -17,33 +17,30 @@
 
 package org.apache.flink.kubernetes.operator.controller;
 
-import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.kubernetes.operator.TestUtils;
 import org.apache.flink.kubernetes.operator.TestingFlinkService;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
+import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
+import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkVersion;
-import org.apache.flink.kubernetes.operator.crd.spec.UpgradeMode;
-import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatus;
 
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.Arguments;
-import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.stream.Stream;
-
+import static org.apache.flink.api.common.JobStatus.RUNNING;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.params.provider.Arguments.arguments;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** @link Missing deployment recovery tests */
+/**
+ * @link Missing deployment recovery tests
+ */
 @EnableKubernetesMockClient(crud = true)
 public class DeploymentRecoveryTest {
 
@@ -59,13 +56,12 @@ public class DeploymentRecoveryTest {
     public void setup() {
         flinkService = new TestingFlinkService(kubernetesClient);
         context = flinkService.getContext();
-        testController =
-                new TestingFlinkDeploymentController(configManager, kubernetesClient, flinkService);
+        testController = new TestingFlinkDeploymentController(configManager, flinkService);
         kubernetesClient.resource(TestUtils.buildApplicationCluster()).createOrReplace();
     }
 
     @ParameterizedTest
-    @MethodSource("applicationTestParams")
+    @MethodSource("org.apache.flink.kubernetes.operator.TestUtils#flinkVersionsAndUpgradeModes")
     public void verifyApplicationJmRecovery(FlinkVersion flinkVersion, UpgradeMode upgradeMode)
             throws Exception {
         FlinkDeployment appCluster = TestUtils.buildApplicationCluster(flinkVersion);
@@ -85,9 +81,11 @@ public class DeploymentRecoveryTest {
 
         // Make sure we do not try to recover JM deployment errors (only missing)
         testController.reconcile(
-                appCluster, TestUtils.createContextWithFailedJobManagerDeployment());
+                appCluster,
+                TestUtils.createContextWithFailedJobManagerDeployment(kubernetesClient));
         testController.reconcile(
-                appCluster, TestUtils.createContextWithFailedJobManagerDeployment());
+                appCluster,
+                TestUtils.createContextWithFailedJobManagerDeployment(kubernetesClient));
         assertEquals(
                 JobManagerDeploymentStatus.ERROR,
                 appCluster.getStatus().getJobManagerDeploymentStatus());
@@ -103,7 +101,7 @@ public class DeploymentRecoveryTest {
         assertEquals(
                 JobManagerDeploymentStatus.READY,
                 appCluster.getStatus().getJobManagerDeploymentStatus());
-        assertEquals(JobStatus.RUNNING.name(), appCluster.getStatus().getJobStatus().getState());
+        assertEquals(RUNNING, appCluster.getStatus().getJobStatus().getState());
 
         // Remove deployment
         flinkService.setPortReady(false);
@@ -118,9 +116,12 @@ public class DeploymentRecoveryTest {
         if (upgradeMode == UpgradeMode.SAVEPOINT) {
             // If deployment goes missing during an upgrade we should throw an error as savepoint
             // information cannot be recovered with complete certainty
-            assertEquals(
-                    JobManagerDeploymentStatus.ERROR,
-                    appCluster.getStatus().getJobManagerDeploymentStatus());
+            assertTrue(
+                    appCluster
+                            .getStatus()
+                            .getError()
+                            .contains(
+                                    "JobManager deployment is missing and HA data is not available to make stateful upgrades."));
         } else {
             flinkService.setPortReady(true);
             testController.reconcile(appCluster, context);
@@ -129,7 +130,7 @@ public class DeploymentRecoveryTest {
             assertEquals(
                     JobManagerDeploymentStatus.READY,
                     appCluster.getStatus().getJobManagerDeploymentStatus());
-            assertEquals("RUNNING", appCluster.getStatus().getJobStatus().getState());
+            assertEquals(RUNNING, appCluster.getStatus().getJobStatus().getState());
             assertEquals(
                     appCluster.getSpec(),
                     appCluster
@@ -140,7 +141,7 @@ public class DeploymentRecoveryTest {
     }
 
     @ParameterizedTest
-    @EnumSource(FlinkVersion.class)
+    @MethodSource("org.apache.flink.kubernetes.operator.TestUtils#flinkVersions")
     public void verifySessionJmRecovery(FlinkVersion flinkVersion) throws Exception {
         FlinkDeployment appCluster = TestUtils.buildSessionCluster(flinkVersion);
         testController.reconcile(appCluster, context);
@@ -167,13 +168,46 @@ public class DeploymentRecoveryTest {
                 appCluster.getStatus().getJobManagerDeploymentStatus());
     }
 
-    private static Stream<Arguments> applicationTestParams() {
-        List<Arguments> args = new ArrayList<>();
-        for (FlinkVersion version : FlinkVersion.values()) {
-            for (UpgradeMode upgradeMode : UpgradeMode.values()) {
-                args.add(arguments(version, upgradeMode));
-            }
+    @ParameterizedTest
+    @MethodSource("org.apache.flink.kubernetes.operator.TestUtils#flinkVersionsAndUpgradeModes")
+    public void verifyRecoveryWithoutHaData(FlinkVersion flinkVersion, UpgradeMode upgradeMode)
+            throws Exception {
+        FlinkDeployment appCluster = TestUtils.buildApplicationCluster(flinkVersion);
+        appCluster.getSpec().getJob().setUpgradeMode(upgradeMode);
+
+        // We disable HA for stateless to test recovery without HA metadata
+        if (upgradeMode == UpgradeMode.STATELESS) {
+            appCluster
+                    .getSpec()
+                    .getFlinkConfiguration()
+                    .put(HighAvailabilityOptions.HA_MODE.key(), "none");
         }
-        return args.stream();
+
+        testController.reconcile(appCluster, context);
+        testController.reconcile(appCluster, context);
+        testController.reconcile(appCluster, context);
+
+        assertEquals(
+                JobManagerDeploymentStatus.READY,
+                appCluster.getStatus().getJobManagerDeploymentStatus());
+
+        // Remove deployment
+        flinkService.setPortReady(false);
+        flinkService.clear();
+
+        // Set HA metadata not available
+        flinkService.setHaDataAvailable(false);
+
+        testController.reconcile(appCluster, context);
+
+        if (upgradeMode == UpgradeMode.STATELESS) {
+            assertEquals(
+                    JobManagerDeploymentStatus.DEPLOYING,
+                    appCluster.getStatus().getJobManagerDeploymentStatus());
+        } else {
+            assertEquals(
+                    JobManagerDeploymentStatus.MISSING,
+                    appCluster.getStatus().getJobManagerDeploymentStatus());
+        }
     }
 }

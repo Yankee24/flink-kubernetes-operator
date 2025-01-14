@@ -20,9 +20,9 @@ package org.apache.flink.kubernetes.operator.kubeclient.decorators;
 import org.apache.flink.kubernetes.kubeclient.FlinkPod;
 import org.apache.flink.kubernetes.kubeclient.decorators.AbstractKubernetesStepDecorator;
 import org.apache.flink.kubernetes.operator.kubeclient.parameters.StandaloneKubernetesJobManagerParameters;
-
-import io.fabric8.kubernetes.api.model.Container;
-import io.fabric8.kubernetes.api.model.ContainerBuilder;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.Container;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.ContainerBuilder;
+import org.apache.flink.kubernetes.utils.Constants;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -36,6 +36,8 @@ public class CmdStandaloneJobManagerDecorator extends AbstractKubernetesStepDeco
 
     public static final String JOBMANAGER_ENTRYPOINT_ARG = "jobmanager";
     public static final String APPLICATION_MODE_ARG = "standalone-job";
+    public static final String POD_IP_ARG =
+            String.format("$(%s)", Constants.ENV_FLINK_POD_IP_ADDRESS);
 
     private final StandaloneKubernetesJobManagerParameters kubernetesJobManagerParameters;
 
@@ -56,10 +58,16 @@ public class CmdStandaloneJobManagerDecorator extends AbstractKubernetesStepDeco
     }
 
     private Container decorateSessionContainer(Container mainContainer) {
-        return new ContainerBuilder(mainContainer)
-                .withCommand(kubernetesJobManagerParameters.getContainerEntrypoint())
-                .withArgs(JOBMANAGER_ENTRYPOINT_ARG)
-                .build();
+        ContainerBuilder containerBuilder =
+                new ContainerBuilder(mainContainer)
+                        .withCommand(kubernetesJobManagerParameters.getContainerEntrypoint())
+                        .addToArgs(JOBMANAGER_ENTRYPOINT_ARG);
+
+        if (kubernetesJobManagerParameters.isHAEnabled()) {
+            containerBuilder.addToArgs(POD_IP_ARG);
+        }
+
+        return containerBuilder.build();
     }
 
     private Container decorateApplicationContainer(Container mainContainer) {
@@ -80,9 +88,19 @@ public class CmdStandaloneJobManagerDecorator extends AbstractKubernetesStepDeco
         }
 
         Boolean allowNonRestoredState = kubernetesJobManagerParameters.getAllowNonRestoredState();
-        if (allowNonRestoredState != null) {
+        if (allowNonRestoredState != null && allowNonRestoredState) {
             args.add("--allowNonRestoredState");
-            args.add(allowNonRestoredState.toString());
+        }
+
+        String savepointPath = kubernetesJobManagerParameters.getSavepointPath();
+        if (savepointPath != null) {
+            args.add("--fromSavepoint");
+            args.add(savepointPath);
+        }
+
+        if (kubernetesJobManagerParameters.isHAEnabled()) {
+            args.add("--host");
+            args.add(POD_IP_ARG);
         }
 
         List<String> jobSpecArgs = kubernetesJobManagerParameters.getJobSpecArgs();

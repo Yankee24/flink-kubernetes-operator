@@ -23,12 +23,12 @@ import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.kubernetes.kubeclient.FlinkPod;
 import org.apache.flink.kubernetes.operator.kubeclient.parameters.StandaloneKubernetesJobManagerParameters;
 import org.apache.flink.kubernetes.operator.standalone.StandaloneKubernetesConfigOptionsInternal;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.ContainerBuilder;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.PodBuilder;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.PodSpecBuilder;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.VolumeBuilder;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.VolumeMount;
 
-import io.fabric8.kubernetes.api.model.ContainerBuilder;
-import io.fabric8.kubernetes.api.model.PodBuilder;
-import io.fabric8.kubernetes.api.model.PodSpecBuilder;
-import io.fabric8.kubernetes.api.model.VolumeBuilder;
-import io.fabric8.kubernetes.api.model.VolumeMount;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
@@ -36,7 +36,9 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/** @link UserLibMountDecorator unit tests */
+/**
+ * @link UserLibMountDecorator unit tests
+ */
 public class UserLibMountDecoratorTest {
 
     @Test

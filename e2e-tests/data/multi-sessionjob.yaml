@@ -22,8 +22,8 @@ metadata:
   namespace: default
   name: session-cluster-1
 spec:
-  image: flink:1.15
-  flinkVersion: v1_15
+  image: flink:1.17
+  flinkVersion: v1_17
   ingress:
     template: "/{{namespace}}/{{name}}(/|$)(.*)"
     className: "nginx"
@@ -37,10 +37,6 @@ spec:
     state.savepoints.dir: file:///opt/flink/volume/flink-sp
   serviceAccount: flink
   podTemplate:
-    apiVersion: v1
-    kind: Pod
-    metadata:
-      name: pod-template
     spec:
       containers:
         # Do not change the main container name
@@ -74,8 +70,8 @@ metadata:
   namespace: flink
   name: session-cluster-1
 spec:
-  image: flink:1.15
-  flinkVersion: v1_15
+  image: flink:1.17
+  flinkVersion: v1_17
   ingress:
     template: "/{{namespace}}/{{name}}(/|$)(.*)"
     className: "nginx"
@@ -89,10 +85,6 @@ spec:
     state.savepoints.dir: file:///opt/flink/volume/flink-sp
   serviceAccount: flink
   podTemplate:
-    apiVersion: v1
-    kind: Pod
-    metadata:
-      name: pod-template
     spec:
       containers:
         # Do not change the main container name

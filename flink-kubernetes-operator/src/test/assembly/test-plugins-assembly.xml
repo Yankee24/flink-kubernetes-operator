@@ -30,6 +30,8 @@ under the License.
             <includes>
                 <include>org/apache/flink/kubernetes/operator/validation/TestValidator.class</include>
                 <include>org/apache/flink/kubernetes/operator/listener/TestingListener.class</include>
+                <include>org/apache/flink/kubernetes/operator/autoscaler/TestingAutoscaler.class</include>
+                <include>org/apache/flink/kubernetes/operator/mutator/TestMutator.java</include>
             </includes>
         </fileSet>
         <fileSet>

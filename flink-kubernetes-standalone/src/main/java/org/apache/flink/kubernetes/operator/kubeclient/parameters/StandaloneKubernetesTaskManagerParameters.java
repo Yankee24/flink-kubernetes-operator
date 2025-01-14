@@ -19,6 +19,8 @@ package org.apache.flink.kubernetes.operator.kubeclient.parameters;
 
 import org.apache.flink.client.deployment.ClusterSpecification;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.ConfigurationUtils;
+import org.apache.flink.configuration.ResourceManagerOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.kubeclient.parameters.AbstractKubernetesParameters;
@@ -73,8 +75,10 @@ public class StandaloneKubernetesTaskManagerParameters extends AbstractKubernete
 
     @Override
     public Map<String, String> getEnvironments() {
-        // TMs have environment set using the pod template.
-        return new HashMap<>();
+        // TMs have environment set using the pod template and config containerized.taskmanager.env
+        return new HashMap<>(
+                ConfigurationUtils.getPrefixedKeyValuePairs(
+                        ResourceManagerOptions.CONTAINERIZED_TASK_MANAGER_ENV_PREFIX, flinkConfig));
     }
 
     @Override
@@ -134,5 +138,12 @@ public class StandaloneKubernetesTaskManagerParameters extends AbstractKubernete
 
     public double getCpuLimitFactor() {
         return flinkConfig.get(KubernetesConfigOptions.TASK_MANAGER_CPU_LIMIT_FACTOR);
+    }
+
+    // Temporally share job manager owner reference config options
+    public List<Map<String, String>> getOwnerReference() {
+        return flinkConfig
+                .getOptional(KubernetesConfigOptions.JOB_MANAGER_OWNER_REFERENCE)
+                .orElse(Collections.emptyList());
     }
 }

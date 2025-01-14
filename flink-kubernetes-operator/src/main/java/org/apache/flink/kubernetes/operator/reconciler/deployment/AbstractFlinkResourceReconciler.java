@@ -17,37 +17,46 @@
 
 package org.apache.flink.kubernetes.operator.reconciler.deployment;
 
+import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.autoscaler.JobAutoScaler;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
+import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
+import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.diff.DiffType;
+import org.apache.flink.kubernetes.operator.api.spec.AbstractFlinkSpec;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
+import org.apache.flink.kubernetes.operator.api.spec.JobState;
+import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
+import org.apache.flink.kubernetes.operator.api.status.CommonStatus;
+import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
+import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
+import org.apache.flink.kubernetes.operator.autoscaler.KubernetesJobAutoScalerContext;
 import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
-import org.apache.flink.kubernetes.operator.crd.AbstractFlinkResource;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.spec.AbstractFlinkSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkDeploymentSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.JobSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.JobState;
-import org.apache.flink.kubernetes.operator.crd.status.CommonStatus;
-import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatus;
-import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
+import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.reconciler.Reconciler;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
-import org.apache.flink.kubernetes.operator.reconciler.diff.DiffType;
-import org.apache.flink.kubernetes.operator.service.FlinkService;
+import org.apache.flink.kubernetes.operator.reconciler.diff.DiffResult;
+import org.apache.flink.kubernetes.operator.reconciler.diff.ReflectiveDiffBuilder;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.FlinkUtils;
 import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
+import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
 
-import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.client.KubernetesClient;
-import io.javaoperatorsdk.operator.api.reconciler.Context;
 import io.javaoperatorsdk.operator.api.reconciler.DeleteControl;
-import org.apache.commons.lang3.StringUtils;
+import io.javaoperatorsdk.operator.processing.event.ResourceID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+
+import static org.apache.flink.autoscaler.config.AutoScalerOptions.AUTOSCALER_ENABLED;
 
 /**
  * Base class for all Flink resource reconcilers. It contains the general flow of reconciling Flink
@@ -62,10 +71,9 @@ public abstract class AbstractFlinkResourceReconciler<
     private static final Logger LOG =
             LoggerFactory.getLogger(AbstractFlinkResourceReconciler.class);
 
-    protected final FlinkConfigManager configManager;
     protected final EventRecorder eventRecorder;
     protected final StatusRecorder<CR, STATUS> statusRecorder;
-    protected final KubernetesClient kubernetesClient;
+    protected final JobAutoScaler<ResourceID, KubernetesJobAutoScalerContext> autoscaler;
 
     public static final String MSG_SUSPENDED = "Suspending existing deployment.";
     public static final String MSG_SPEC_CHANGED =
@@ -73,26 +81,25 @@ public abstract class AbstractFlinkResourceReconciler<
     public static final String MSG_ROLLBACK = "Rolling back failed deployment.";
     public static final String MSG_SUBMIT = "Starting deployment";
 
+    protected Clock clock = Clock.systemDefaultZone();
+
     public AbstractFlinkResourceReconciler(
-            KubernetesClient kubernetesClient,
-            FlinkConfigManager configManager,
             EventRecorder eventRecorder,
-            StatusRecorder<CR, STATUS> statusRecorder) {
-        this.kubernetesClient = kubernetesClient;
-        this.configManager = configManager;
+            StatusRecorder<CR, STATUS> statusRecorder,
+            JobAutoScaler<ResourceID, KubernetesJobAutoScalerContext> autoscaler) {
         this.eventRecorder = eventRecorder;
         this.statusRecorder = statusRecorder;
+        this.autoscaler = autoscaler;
     }
 
     @Override
-    public final void reconcile(CR cr, Context<?> ctx) throws Exception {
-        var spec = cr.getSpec();
-        var deployConfig = getDeployConfig(cr.getMetadata(), spec, ctx);
+    public void reconcile(FlinkResourceContext<CR> ctx) throws Exception {
+        var cr = ctx.getResource();
         var status = cr.getStatus();
         var reconciliationStatus = cr.getStatus().getReconciliationStatus();
 
         // If the resource is not ready for reconciliation we simply return
-        if (!readyToReconcile(cr, ctx, deployConfig)) {
+        if (!readyToReconcile(ctx)) {
             LOG.info("Not ready for reconciliation yet...");
             return;
         }
@@ -100,23 +107,21 @@ public abstract class AbstractFlinkResourceReconciler<
         // If this is the first deployment for the resource we simply submit the job and return.
         // No further logic is required at this point.
         if (reconciliationStatus.isBeforeFirstDeployment()) {
+            var spec = cr.getSpec();
+
+            // If the job is submitted in suspend state, no need to reconcile
+            if (spec.getJob() != null && spec.getJob().getState().equals(JobState.SUSPENDED)) {
+                return;
+            }
+
             LOG.info("Deploying for the first time");
+            var deployConfig = ctx.getDeployConfig(spec);
+            updateStatusBeforeFirstDeployment(
+                    cr, spec, deployConfig, status, ctx.getKubernetesClient());
 
-            // Before we try to submit the job we record the current spec in the status so we can
-            // handle subsequent deployment and status update errors
-            ReconciliationUtils.updateStatusBeforeDeploymentAttempt(cr, deployConfig);
-            statusRecorder.patchAndCacheStatus(cr);
+            deploy(ctx, spec, deployConfig, getInitialSnapshotPath(spec), false);
 
-            deploy(
-                    cr,
-                    spec,
-                    status,
-                    ctx,
-                    deployConfig,
-                    Optional.ofNullable(spec.getJob()).map(JobSpec::getInitialSavepointPath),
-                    false);
-
-            ReconciliationUtils.updateStatusForDeployedSpec(cr, deployConfig);
+            ReconciliationUtils.updateStatusForDeployedSpec(cr, deployConfig, clock);
             return;
         }
 
@@ -124,144 +129,187 @@ public abstract class AbstractFlinkResourceReconciler<
                 cr.getStatus().getReconciliationStatus().deserializeLastReconciledSpec();
         SPEC currentDeploySpec = cr.getSpec();
 
-        var specDiff = currentDeploySpec.diff(lastReconciledSpec);
+        applyAutoscaler(ctx);
 
-        var flinkService = getFlinkService(cr, ctx);
+        var reconciliationState = reconciliationStatus.getState();
+        var specDiff =
+                new ReflectiveDiffBuilder<>(
+                                ctx.getDeploymentMode(), lastReconciledSpec, currentDeploySpec)
+                        .build();
+        var diffType = specDiff.getType();
 
         boolean specChanged =
-                DiffType.IGNORE != specDiff.getType()
-                        || reconciliationStatus.getState() == ReconciliationState.UPGRADING;
+                DiffType.IGNORE != diffType || reconciliationState == ReconciliationState.UPGRADING;
 
-        var observeConfig = getObserveConfig(cr, ctx);
+        if (shouldRollBack(ctx, specChanged, lastReconciledSpec)) {
+            prepareCrForRollback(ctx, specChanged, lastReconciledSpec);
+            specChanged = true;
+            diffType = DiffType.UPGRADE;
+        }
 
         if (specChanged) {
-
+            var deployConfig = ctx.getDeployConfig(cr.getSpec());
             if (checkNewSpecAlreadyDeployed(cr, deployConfig)) {
                 return;
             }
+            triggerSpecChangeEvent(cr, specDiff, ctx.getKubernetesClient());
 
-            var specChangeMessage = String.format(MSG_SPEC_CHANGED, specDiff.getType(), specDiff);
-            LOG.info(specChangeMessage);
-            if (reconciliationStatus.getState() != ReconciliationState.UPGRADING) {
-                eventRecorder.triggerEvent(
-                        cr,
-                        EventRecorder.Type.Normal,
-                        EventRecorder.Reason.SpecChanged,
-                        EventRecorder.Component.JobManagerDeployment,
-                        specChangeMessage);
-            }
-            reconcileSpecChange(cr, ctx, observeConfig, deployConfig, specDiff.getType());
-        } else if (shouldRollBack(cr, observeConfig, flinkService)) {
-            // Rollbacks are executed in two steps, we initiate it first then return
-            if (initiateRollBack(status)) {
+            // Try scaling if this is not an upgrade/redeploy change
+            boolean scaled =
+                    diffType != DiffType.SAVEPOINT_REDEPLOY
+                            && diffType != DiffType.UPGRADE
+                            && scale(ctx, deployConfig);
+
+            // Reconcile spec change unless scaling was enough
+            if (scaled || reconcileSpecChange(diffType, ctx, deployConfig, lastReconciledSpec)) {
+                // If we executed a scale or spec upgrade action we return, otherwise we
+                // continue to reconcile other changes
                 return;
             }
-            LOG.warn(MSG_ROLLBACK);
-            eventRecorder.triggerEvent(
-                    cr,
-                    EventRecorder.Type.Normal,
-                    EventRecorder.Reason.Rollback,
-                    EventRecorder.Component.JobManagerDeployment,
-                    MSG_ROLLBACK);
-            rollback(cr, ctx, observeConfig);
-        } else if (!reconcileOtherChanges(cr, ctx, observeConfig)) {
+        } else {
+            ReconciliationUtils.updateReconciliationMetadata(cr);
+        }
+
+        if (!reconcileOtherChanges(ctx)) {
             LOG.info("Resource fully reconciled, nothing to do...");
         }
     }
 
-    /**
-     * Get Flink configuration object for deploying the given spec using {@link #deploy}.
-     *
-     * @param meta ObjectMeta of the related resource.
-     * @param spec Spec for which the config should be created.
-     * @param ctx Reconciliation context.
-     * @return Deployment configuration.
-     */
-    protected abstract Configuration getDeployConfig(ObjectMeta meta, SPEC spec, Context<?> ctx);
+    private Optional<String> getInitialSnapshotPath(AbstractFlinkSpec spec) {
+        if (spec.getJob() == null) {
+            return Optional.empty();
+        }
+
+        return Optional.ofNullable(spec.getJob().getInitialSavepointPath());
+    }
+
+    private void applyAutoscaler(FlinkResourceContext<CR> ctx) throws Exception {
+        var autoScalerCtx = ctx.getJobAutoScalerContext();
+        var resource = ctx.getResource();
+        boolean autoscalerEnabled =
+                resource.getSpec().getJob() != null
+                        && ctx.getObserveConfig().getBoolean(AUTOSCALER_ENABLED);
+        autoScalerCtx.getConfiguration().set(AUTOSCALER_ENABLED, autoscalerEnabled);
+
+        var reconStatus = resource.getStatus().getReconciliationStatus();
+        if (!reconStatus.isBeforeFirstDeployment() && autoscalerEnabled) {
+            var newResetNonce = resource.getSpec().getJob().getAutoscalerResetNonce();
+            // check if the nonce changed to a non-null value
+            if (newResetNonce != null
+                    && !newResetNonce.equals(
+                            reconStatus
+                                    .deserializeLastReconciledSpec()
+                                    .getJob()
+                                    .getAutoscalerResetNonce())) {
+                autoscaler.cleanup(autoScalerCtx);
+                ReconciliationUtils.updateLastReconciledAutoscalerResetNonce(resource);
+            }
+        }
+
+        autoscaler.scale(autoScalerCtx);
+    }
+
+    private void triggerSpecChangeEvent(CR cr, DiffResult<SPEC> specDiff, KubernetesClient client) {
+        if (DiffType.IGNORE == specDiff.getType()) {
+            // This can happen if an ignore change comes in while we are waiting in upgrading state
+            // for scaling completion
+            return;
+        }
+        eventRecorder.triggerEventOnce(
+                cr,
+                EventRecorder.Type.Normal,
+                EventRecorder.Reason.SpecChanged,
+                String.format(MSG_SPEC_CHANGED, specDiff.getType(), specDiff),
+                EventRecorder.Component.JobManagerDeployment,
+                "SpecChange: " + cr.getMetadata().getGeneration(),
+                client);
+    }
 
     /**
-     * Get Flink configuration for client interactions with the running Flink deployment/session
-     * job.
+     * Update the status before the first deployment. We have to record the upgrade mode based on
+     * the initial savepoint path provided, and record the to-be-deployed spec in the status.
      *
-     * @param resource Related Flink resource.
-     * @param context Reconciliation context.
-     * @return Observe configuration.
+     * @param cr Related flink resource
+     * @param spec Spec to be deployed
+     * @param deployConfig Deploy configuration
+     * @param status Resource status
      */
-    protected abstract Configuration getObserveConfig(CR resource, Context<?> context);
+    private void updateStatusBeforeFirstDeployment(
+            CR cr, SPEC spec, Configuration deployConfig, STATUS status, KubernetesClient client) {
+        if (spec.getJob() != null) {
+            var initialUpgradeMode = UpgradeMode.STATELESS;
+            var initialSp = spec.getJob().getInitialSavepointPath();
+
+            if (initialSp != null) {
+                status.getJobStatus().setUpgradeSavepointPath(initialSp);
+                initialUpgradeMode = UpgradeMode.SAVEPOINT;
+            }
+
+            spec.getJob().setUpgradeMode(initialUpgradeMode);
+        }
+        ReconciliationUtils.updateStatusBeforeDeploymentAttempt(cr, deployConfig, clock);
+        // Before we try to submit the job we record the current spec in the status so we can
+        // handle subsequent deployment and status update errors
+        statusRecorder.patchAndCacheStatus(cr, client);
+    }
 
     /**
      * Check whether the given Flink resource is ready to be reconciled or we are still waiting for
      * any pending operation or condition first.
      *
-     * @param cr Related Flink resource.
      * @param ctx Reconciliation context.
-     * @param deployConfig Deployment configuration.
      * @return True if the resource is ready to be reconciled.
      */
-    protected abstract boolean readyToReconcile(CR cr, Context<?> ctx, Configuration deployConfig);
+    protected abstract boolean readyToReconcile(FlinkResourceContext<CR> ctx);
 
     /**
      * Reconcile spec upgrade on the currently deployed/suspended Flink resource and update the
      * status accordingly.
      *
-     * @param cr Related Flink resource.
-     * @param observeConfig Observe configuration.
-     * @param deployConfig Deployment configuration.
-     * @throws Exception Error during spec upgrade.
-     */
-    protected abstract void reconcileSpecChange(
-            CR cr,
-            Context<?> ctx,
-            Configuration observeConfig,
-            Configuration deployConfig,
-            DiffType diffType)
-            throws Exception;
-
-    /**
-     * Rollback deployed resource to the last stable spec.
-     *
-     * @param cr Related Flink resource.
+     * @param diffType SpecChange diff type.
      * @param ctx Reconciliation context.
-     * @param observeConfig Observe configuration.
-     * @throws Exception Error during rollback.
+     * @param deployConfig Deployment configuration.
+     * @param lastReconciledSpec Last reconciled spec
+     * @throws Exception Error during spec upgrade.
+     * @return True if spec change reconciliation was executed
      */
-    protected abstract void rollback(CR cr, Context<?> ctx, Configuration observeConfig)
+    protected abstract boolean reconcileSpecChange(
+            DiffType diffType,
+            FlinkResourceContext<CR> ctx,
+            Configuration deployConfig,
+            SPEC lastReconciledSpec)
             throws Exception;
 
     /**
      * Reconcile any other changes required for this resource that are specific to the reconciler
      * implementation.
      *
-     * @param cr Related Flink resource.
-     * @param observeConfig Observe configuration.
+     * @param ctx Reconciliation context.
      * @return True if any further reconciliation action was taken.
      * @throws Exception Error during reconciliation.
      */
-    protected abstract boolean reconcileOtherChanges(
-            CR cr, Context<?> context, Configuration observeConfig) throws Exception;
+    protected abstract boolean reconcileOtherChanges(FlinkResourceContext<CR> ctx) throws Exception;
 
     @Override
-    public final DeleteControl cleanup(CR resource, Context<?> context) {
-        return cleanupInternal(resource, context);
+    public DeleteControl cleanup(FlinkResourceContext<CR> ctx) {
+        autoscaler.cleanup(ctx.getJobAutoScalerContext());
+        return cleanupInternal(ctx);
     }
 
     /**
      * Deploys the target resource spec to Kubernetes.
      *
-     * @param relatedResource Related resource.
-     * @param spec Spec that should be deployed to Kubernetes.
-     * @param status Status object of the resource
-     * @param deployConfig Flink conf for the deployment.
      * @param ctx Reconciliation context.
+     * @param spec Spec that should be deployed to Kubernetes.
+     * @param deployConfig Flink conf for the deployment.
      * @param savepoint Optional savepoint path for applications and session jobs.
      * @param requireHaMetadata Flag used by application deployments to validate HA metadata
      * @throws Exception Error during deployment.
      */
-    protected abstract void deploy(
-            CR relatedResource,
+    @VisibleForTesting
+    public abstract void deploy(
+            FlinkResourceContext<CR> ctx,
             SPEC spec,
-            STATUS status,
-            Context<?> ctx,
             Configuration deployConfig,
             Optional<String> savepoint,
             boolean requireHaMetadata)
@@ -270,20 +318,10 @@ public abstract class AbstractFlinkResourceReconciler<
     /**
      * Shut down and clean up all Flink job/cluster resources.
      *
-     * @param resource Resource being reconciled.
-     * @param context Current context.
+     * @param ctx Current context.
      * @return DeleteControl object.
      */
-    protected abstract DeleteControl cleanupInternal(CR resource, Context<?> context);
-
-    /**
-     * Get the Flink service related to the resource and context.
-     *
-     * @param resource Resource being reconciled.
-     * @param context Current context.
-     * @return Flink service implementation.
-     */
-    protected abstract FlinkService getFlinkService(CR resource, Context<?> context);
+    protected abstract DeleteControl cleanupInternal(FlinkResourceContext<CR> ctx);
 
     /**
      * Checks whether the desired spec already matches the currently deployed spec. If they match
@@ -295,17 +333,40 @@ public abstract class AbstractFlinkResourceReconciler<
      */
     private boolean checkNewSpecAlreadyDeployed(CR resource, Configuration deployConf) {
         if (resource.getStatus().getReconciliationStatus().getState()
-                == ReconciliationState.UPGRADING) {
+                        == ReconciliationState.UPGRADING
+                || resource.getStatus().getReconciliationStatus().getState()
+                        == ReconciliationState.ROLLING_BACK) {
             return false;
         }
         AbstractFlinkSpec deployedSpec = ReconciliationUtils.getDeployedSpec(resource);
         if (resource.getSpec().equals(deployedSpec)) {
             LOG.info(
                     "The new spec matches the currently deployed last stable spec. No upgrade needed.");
-            ReconciliationUtils.updateStatusForDeployedSpec(resource, deployConf);
+            ReconciliationUtils.updateStatusForDeployedSpec(resource, deployConf, clock);
             return true;
         }
         return false;
+    }
+
+    /**
+     * Scale the cluster in-place if possible, either through reactive scaling or declarative
+     * resources.
+     *
+     * @param ctx Resource context.
+     * @param deployConfig Configuration to be deployed.
+     * @return True if the scaling is successful
+     * @throws Exception
+     */
+    private boolean scale(FlinkResourceContext<CR> ctx, Configuration deployConfig)
+            throws Exception {
+
+        var scaled = ctx.getFlinkService().scale(ctx, deployConfig);
+
+        if (scaled) {
+            ReconciliationUtils.updateStatusForDeployedSpec(ctx.getResource(), deployConfig, clock);
+        }
+
+        return scaled;
     }
 
     /**
@@ -315,18 +376,23 @@ public abstract class AbstractFlinkResourceReconciler<
      *
      * <p>Rollbacks are only supported to previously running resource specs with HA enabled.
      *
-     * @param resource Resource being reconciled.
-     * @param configuration Flink cluster configuration.
+     * @param ctx Reconciliation context.
+     * @param specChanged Flag indicating whether the spec changed
      * @return True if the resource should be rolled back.
      */
     private boolean shouldRollBack(
-            AbstractFlinkResource<SPEC, STATUS> resource,
-            Configuration configuration,
-            FlinkService flinkService) {
+            FlinkResourceContext<CR> ctx, boolean specChanged, SPEC lastReconciledSpec) {
 
+        var resource = ctx.getResource();
         var reconciliationStatus = resource.getStatus().getReconciliationStatus();
+        var configuration = ctx.getObserveConfig();
+
         if (reconciliationStatus.getState() == ReconciliationState.ROLLING_BACK) {
             return true;
+        }
+
+        if (specChanged) {
+            return false;
         }
 
         if (!configuration.get(KubernetesOperatorConfigOptions.DEPLOYMENT_ROLLBACK_ENABLED)
@@ -354,37 +420,70 @@ public abstract class AbstractFlinkResourceReconciler<
 
         Duration readinessTimeout =
                 configuration.get(KubernetesOperatorConfigOptions.DEPLOYMENT_READINESS_TIMEOUT);
-        if (!Instant.now()
+        if (!clock.instant()
                 .minus(readinessTimeout)
                 .isAfter(Instant.ofEpochMilli(reconciliationStatus.getReconciliationTimestamp()))) {
             return false;
         }
 
-        var haDataAvailable = flinkService.isHaMetadataAvailable(configuration);
+        if (lastReconciledSpec.getJob() != null
+                && lastReconciledSpec.getJob().getUpgradeMode() == UpgradeMode.SAVEPOINT
+                && FlinkUtils.jmPodNeverStarted(ctx.getJosdkContext())) {
+            // HA data not available as JM never start and relying on SAVEPOINT upgrade mode
+            // Safe to rollback relying on savepoint
+            return true;
+        }
+
+        var haDataAvailable = ctx.getFlinkService().isHaMetadataAvailable(configuration);
         if (!haDataAvailable) {
             LOG.warn("Rollback is not possible due to missing HA metadata");
         }
         return haDataAvailable;
     }
 
-    /**
-     * Initiate rollback process by changing the {@link ReconciliationState} in the status.
-     *
-     * @param status Resource status.
-     * @return True if a new rollback was initiated.
-     */
-    private boolean initiateRollBack(STATUS status) {
+    private void prepareCrForRollback(
+            FlinkResourceContext<CR> ctx, boolean specChanged, SPEC lastReconciledSpec) {
+        var cr = ctx.getResource();
+        var status = cr.getStatus();
         var reconciliationStatus = status.getReconciliationStatus();
+
         if (reconciliationStatus.getState() != ReconciliationState.ROLLING_BACK) {
-            LOG.warn("Preparing to roll back to last stable spec.");
-            if (StringUtils.isEmpty(status.getError())) {
-                status.setError(
-                        "Deployment is not ready within the configured timeout, rolling back.");
-            }
+            // When we initiate rollback we trigger a one time event
             reconciliationStatus.setState(ReconciliationState.ROLLING_BACK);
-            return true;
+            LOG.warn(MSG_ROLLBACK);
+            eventRecorder.triggerEvent(
+                    ctx.getResource(),
+                    EventRecorder.Type.Normal,
+                    EventRecorder.Reason.Rollback,
+                    EventRecorder.Component.JobManagerDeployment,
+                    MSG_ROLLBACK,
+                    ctx.getKubernetesClient());
+        } else {
+            if (lastReconciledSpec.getJob() != null) {
+                // The rollback SUSPENDED status is not recorded anywhere currently. Since the
+                // reconciler looks at the lastReconciled spec state to decide on the next action
+                // (cancel vs deploy) this is a simple trick to make the rollback flow work
+                // correctly.
+                lastReconciledSpec.getJob().setState(JobState.SUSPENDED);
+            }
         }
-        return false;
+
+        if (specChanged) {
+            // If spec has changed while rolling back we should apply new spec and move to upgrading
+            // state to break out of the rollback flow.
+            reconciliationStatus.setState(ReconciliationState.UPGRADING);
+        } else {
+            cr.setSpec(reconciliationStatus.deserializeLastStableSpec());
+            var job = cr.getSpec().getJob();
+            if (job != null) {
+                // The last stable spec may have a completely different upgrade mode, then what we
+                // used the last time. We set it based on the lastReconciledSpec
+                job.setUpgradeMode(
+                        lastReconciledSpec.getJob().getUpgradeMode() == UpgradeMode.STATELESS
+                                ? UpgradeMode.STATELESS
+                                : UpgradeMode.LAST_STATE);
+            }
+        }
     }
 
     /**
@@ -396,27 +495,41 @@ public abstract class AbstractFlinkResourceReconciler<
      * @param deployment FlinkDeployment object.
      * @return True if recovery should be executed.
      */
-    protected static boolean shouldRecoverDeployment(
-            Configuration conf, FlinkDeployment deployment) {
+    protected boolean shouldRecoverDeployment(Configuration conf, FlinkDeployment deployment) {
+        boolean result = false;
 
-        if (!jmMissingForRunningDeployment(deployment)
-                || !conf.get(
-                        KubernetesOperatorConfigOptions.OPERATOR_JM_DEPLOYMENT_RECOVERY_ENABLED)) {
-            return false;
+        if (conf.get(KubernetesOperatorConfigOptions.OPERATOR_JM_DEPLOYMENT_RECOVERY_ENABLED)) {
+            LOG.debug("Checking whether jobmanager deployment needs recovery");
+
+            if (jmMissingForRunningDeployment(deployment)) {
+                LOG.debug("Jobmanager deployment is missing, trying to recover");
+                var jobSpec = deployment.getSpec().getJob();
+                boolean stateless =
+                        jobSpec != null && jobSpec.getUpgradeMode() == UpgradeMode.STATELESS;
+                if (stateless || HighAvailabilityMode.isHighAvailabilityModeActivated(conf)) {
+                    LOG.debug("HA is enabled, recovering lost jobmanager deployment");
+                    result = true;
+                } else {
+                    LOG.warn("Could not recover lost jobmanager deployment without HA enabled");
+                }
+            }
         }
 
-        if (!FlinkUtils.isKubernetesHAActivated(conf)) {
-            LOG.warn("Could not recover lost deployment without HA enabled");
-            return false;
-        }
-        return true;
+        return result;
     }
 
-    private static boolean jmMissingForRunningDeployment(FlinkDeployment deployment) {
+    private boolean jmMissingForRunningDeployment(FlinkDeployment deployment) {
         var deployedJob = ReconciliationUtils.getDeployedSpec(deployment).getJob();
-        return (deployedJob == null || deployedJob.getState() == JobState.RUNNING)
-                && (deployment.getStatus().getJobManagerDeploymentStatus()
-                        == JobManagerDeploymentStatus.MISSING);
+        var status = deployment.getStatus();
+        var jobStatus = status.getJobStatus();
+        boolean sessionCluster = deployedJob == null;
+        boolean nonTerminalApplication =
+                !sessionCluster
+                        && deployedJob.getState() == JobState.RUNNING
+                        && !jobStatus.getState().isGloballyTerminalState();
+        boolean jmShouldBeRunning = sessionCluster || nonTerminalApplication;
+        return jmShouldBeRunning
+                && (status.getJobManagerDeploymentStatus() == JobManagerDeploymentStatus.MISSING);
     }
 
     protected boolean flinkVersionChanged(SPEC oldSpec, SPEC newSpec) {
@@ -425,5 +538,23 @@ public abstract class AbstractFlinkResourceReconciler<
                     != ((FlinkDeploymentSpec) newSpec).getFlinkVersion();
         }
         return false;
+    }
+
+    protected void setOwnerReference(CR owner, Configuration deployConfig) {
+        final Map<String, String> ownerReference =
+                Map.of(
+                        "apiVersion", owner.getApiVersion(),
+                        "kind", owner.getKind(),
+                        "name", owner.getMetadata().getName(),
+                        "uid", owner.getMetadata().getUid(),
+                        "blockOwnerDeletion", "true",
+                        "controller", "false");
+        deployConfig.set(
+                KubernetesConfigOptions.JOB_MANAGER_OWNER_REFERENCE, List.of(ownerReference));
+    }
+
+    @VisibleForTesting
+    public void setClock(Clock clock) {
+        this.clock = clock;
     }
 }

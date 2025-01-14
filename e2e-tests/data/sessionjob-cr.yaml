@@ -22,8 +22,8 @@ metadata:
   namespace: default
   name: session-cluster-1
 spec:
-  image: flink:1.15
-  flinkVersion: v1_15
+  image: flink:1.17
+  flinkVersion: v1_17
   ingress:
     template: "/{{namespace}}/{{name}}(/|$)(.*)"
     className: "nginx"
@@ -35,12 +35,9 @@ spec:
     high-availability.storageDir: file:///opt/flink/volume/flink-ha
     state.checkpoints.dir: file:///opt/flink/volume/flink-cp
     state.savepoints.dir: file:///opt/flink/volume/flink-sp
+    kubernetes.operator.snapshot.resource.enabled: "false"
   serviceAccount: flink
   podTemplate:
-    apiVersion: v1
-    kind: Pod
-    metadata:
-      name: pod-template
     spec:
       containers:
         # Do not change the main container name
@@ -59,7 +56,7 @@ spec:
             claimName: session-cluster-1-pvc
   jobManager:
     resource:
-      memory: "1024m"
+      memory: "1Gi"
       cpu: 0.5
   taskManager:
     resource:
@@ -105,4 +102,3 @@ metadata:
   name: nginx
 spec:
   controller: k8s.io/ingress-nginx
-

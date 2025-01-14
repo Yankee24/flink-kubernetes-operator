@@ -18,36 +18,53 @@
 package org.apache.flink.kubernetes.operator.metrics;
 
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.kubernetes.operator.crd.AbstractFlinkResource;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.Histogram;
 import org.apache.flink.metrics.Meter;
 import org.apache.flink.metrics.Metric;
+import org.apache.flink.metrics.View;
+import org.apache.flink.runtime.metrics.ViewUpdater;
 import org.apache.flink.runtime.metrics.util.TestingMetricRegistry;
+import org.apache.flink.util.concurrent.ExecutorThreadFactory;
+
+import io.fabric8.kubernetes.client.CustomResource;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 /** Utility class for metrics testing. */
 public class TestingMetricListener {
-
     public static final String DELIMITER = ".";
-    private final KubernetesOperatorMetricGroup metricGroup;
-    private final Map<String, Metric> metrics = new HashMap();
     private static final String NAMESPACE = "test-op-ns";
     private static final String NAME = "test-op-name";
     private static final String HOST = "test-op-host";
+    private final KubernetesOperatorMetricGroup metricGroup;
+    private final Map<String, Metric> metrics = new HashMap();
+    private final ScheduledExecutorService executor;
     private Configuration configuration;
+    private ViewUpdater viewUpdater;
 
     public TestingMetricListener(Configuration configuration) {
+        this.executor =
+                Executors.newSingleThreadScheduledExecutor(
+                        new ExecutorThreadFactory("Flink-TestingMetricRegistry"));
+
         TestingMetricRegistry registry =
                 TestingMetricRegistry.builder()
                         .setDelimiter(DELIMITER.charAt(0))
                         .setRegisterConsumer(
                                 (metric, name, group) -> {
                                     this.metrics.put(group.getMetricIdentifier(name), metric);
+                                    if (metric instanceof View) {
+                                        if (viewUpdater == null) {
+                                            viewUpdater = new ViewUpdater(executor);
+                                        }
+                                        viewUpdater.notifyOfAddedView((View) metric);
+                                    }
                                 })
                         .build();
         this.metricGroup =
@@ -85,7 +102,7 @@ public class TestingMetricListener {
     }
 
     public String getNamespaceMetricId(
-            Class<? extends AbstractFlinkResource<?, ?>> resourceClass,
+            Class<? extends CustomResource<?, ?>> resourceClass,
             String resourceNs,
             String... identifiers) {
         return metricGroup
@@ -94,13 +111,13 @@ public class TestingMetricListener {
     }
 
     public String getResourceMetricId(
-            Class<? extends AbstractFlinkResource<?, ?>> resourceClass,
+            Class<? extends CustomResource<?, ?>> resourceClass,
             String resourceNs,
             String resourceName,
             String... identifiers) {
         return metricGroup
                 .createResourceNamespaceGroup(configuration, resourceClass, resourceNs)
-                .createResourceNamespaceGroup(configuration, resourceName)
+                .createResourceGroup(configuration, resourceName)
                 .getMetricIdentifier(String.join(DELIMITER, identifiers));
     }
 

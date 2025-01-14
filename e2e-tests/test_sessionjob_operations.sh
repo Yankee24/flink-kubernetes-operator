@@ -20,17 +20,18 @@
 # This script tests the session job operations:
 # 1. Trigger savepoint
 # 2. savepoint mode upgrade
-source "$(dirname "$0")"/utils.sh
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+source "${SCRIPT_DIR}/utils.sh"
 
 CLUSTER_ID="session-cluster-1"
-APPLICATION_YAML="e2e-tests/data/sessionjob-cr.yaml"
+APPLICATION_YAML="${SCRIPT_DIR}/data/sessionjob-cr.yaml"
 TIMEOUT=300
 SESSION_CLUSTER_IDENTIFIER="flinkdep/$CLUSTER_ID"
 SESSION_JOB_NAME="flink-example-statemachine"
 SESSION_JOB_IDENTIFIER="sessionjob/$SESSION_JOB_NAME"
 OPERATOR_POD_LABEL="app.kubernetes.io/name=flink-kubernetes-operator"
 
-on_exit cleanup_and_exit $APPLICATION_YAML $TIMEOUT $CLUSTER_ID
+on_exit cleanup_and_exit "$APPLICATION_YAML" $TIMEOUT $CLUSTER_ID
 
 retry_times 5 30 "kubectl apply -f $APPLICATION_YAML" || exit 1
 
@@ -45,14 +46,15 @@ assert_available_slots 0 $CLUSTER_ID
 # Testing trigger savepoint
 kubectl patch sessionjob ${SESSION_JOB_NAME} --type merge --patch '{"spec":{"job": {"savepointTriggerNonce": 123456 } } }'
 wait_for_logs $jm_pod_name "Triggering savepoint for job" ${TIMEOUT} || exit 1
-wait_for_status $SESSION_JOB_IDENTIFIER '.status.jobStatus.savepointInfo.triggerId' "" $TIMEOUT || exit 1
-wait_for_status $SESSION_JOB_IDENTIFIER '.status.jobStatus.savepointInfo.triggerTimestamp' 0 $TIMEOUT || exit 1
+wait_for_status $SESSION_JOB_IDENTIFIER '.status.jobStatus.savepointInfo.triggerId' null $TIMEOUT || exit 1
+wait_for_status $SESSION_JOB_IDENTIFIER '.status.jobStatus.savepointInfo.triggerTimestamp' null $TIMEOUT || exit 1
 location=$(kubectl get $SESSION_JOB_IDENTIFIER -o yaml | yq '.status.jobStatus.savepointInfo.lastSavepoint.location')
 if [ "$location" == "" ];then
   echo "lost savepoint location"
   exit 1
 fi
 
+echo "Starting sessionjob savepoint upgrade test"
 # Testing savepoint mode upgrade
 # Update the FlinkSessionJob and trigger the savepoint upgrade
 kubectl patch sessionjob ${SESSION_JOB_NAME} --type merge --patch '{"spec":{"job": {"parallelism": 1 } } }'
@@ -65,6 +67,24 @@ wait_for_status $SESSION_JOB_IDENTIFIER '.status.jobStatus.state' RUNNING ${TIME
 assert_available_slots 1 $CLUSTER_ID
 
 echo "Successfully run the sessionjob savepoint upgrade test"
+
+flink_version=$(kubectl get $SESSION_CLUSTER_IDENTIFIER -o yaml | yq '.spec.flinkVersion')
+
+if [ "$flink_version" != "v1_16" ]; then
+  echo "Starting sessionjob last-state upgrade test"
+  # Testing last-state mode upgrade
+  # Update the FlinkSessionJob and trigger the last-state upgrade
+  kubectl patch sessionjob ${SESSION_JOB_NAME} --type merge --patch '{"spec":{"job": {"parallelism": 2, "upgradeMode": "last-state" } } }'
+
+  # Check the job was restarted with the new parallelism
+  wait_for_status $SESSION_JOB_IDENTIFIER '.status.jobStatus.state' CANCELLING ${TIMEOUT} || exit 1
+  wait_for_status $SESSION_JOB_IDENTIFIER '.status.jobStatus.state' RUNNING ${TIMEOUT} || exit 1
+  assert_available_slots 0 $CLUSTER_ID
+
+  echo "Successfully run the sessionjob last-state upgrade test"
+else
+  echo "Skipping last-state test for flink version 1.16"
+fi
 
 # Test Operator restart
 echo "Delete session job " + $SESSION_JOB_NAME

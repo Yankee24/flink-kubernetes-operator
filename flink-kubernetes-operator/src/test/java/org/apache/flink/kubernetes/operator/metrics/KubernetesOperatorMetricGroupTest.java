@@ -18,7 +18,7 @@
 package org.apache.flink.kubernetes.operator.metrics;
 
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.kubernetes.operator.crd.FlinkSessionJob;
+import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
 import org.apache.flink.runtime.metrics.MetricRegistryConfiguration;
 import org.apache.flink.runtime.metrics.MetricRegistryImpl;
 
@@ -30,7 +30,9 @@ import static org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMet
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/** @link KubernetesOperatorMetricGroup tests. */
+/**
+ * @link KubernetesOperatorMetricGroup tests.
+ */
 public class KubernetesOperatorMetricGroupTest {
 
     @Test
@@ -63,7 +65,7 @@ public class KubernetesOperatorMetricGroupTest {
                         "flink-kubernetes-operator"),
                 group.getAllVariables());
 
-        registry.shutdown().get();
+        registry.close();
     }
 
     @Test
@@ -96,7 +98,7 @@ public class KubernetesOperatorMetricGroupTest {
                         "flink-kubernetes-operator"),
                 group.getAllVariables());
 
-        registry.shutdown().get();
+        registry.close();
     }
 
     @Test
@@ -114,7 +116,7 @@ public class KubernetesOperatorMetricGroupTest {
         var namespaceGroup =
                 operatorMetricGroup.createResourceNamespaceGroup(
                         configuration, FlinkSessionJob.class, "rns");
-        var resourceGroup = namespaceGroup.createResourceNamespaceGroup(configuration, "rn");
+        var resourceGroup = namespaceGroup.createResourceGroup(configuration, "rn");
 
         assertEquals(
                 Map.of(
@@ -145,7 +147,7 @@ public class KubernetesOperatorMetricGroupTest {
                         "<resourcetype>",
                         "FlinkSessionJob"),
                 resourceGroup.getAllVariables());
-        registry.shutdown().get();
+        registry.close();
     }
 
     private static MetricRegistryConfiguration fromConfiguration(Configuration configuration) {

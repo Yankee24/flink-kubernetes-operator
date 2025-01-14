@@ -18,12 +18,14 @@
 
 package org.apache.flink.kubernetes.operator;
 
-import org.apache.flink.kubernetes.operator.crd.AbstractFlinkResource;
-import org.apache.flink.kubernetes.operator.crd.status.CommonStatus;
+import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
+import org.apache.flink.kubernetes.operator.api.status.CommonStatus;
 import org.apache.flink.kubernetes.operator.metrics.MetricManager;
 import org.apache.flink.kubernetes.operator.utils.StatusRecorder;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.fabric8.kubernetes.client.KubernetesClient;
+import io.javaoperatorsdk.operator.processing.event.ResourceID;
 
 /** Testing statusRecorder. */
 public class TestingStatusRecorder<
@@ -31,13 +33,13 @@ public class TestingStatusRecorder<
         extends StatusRecorder<CR, STATUS> {
 
     public TestingStatusRecorder() {
-        super(null, new MetricManager<>(), (r, s) -> {});
+        super(new MetricManager<>(), (r, s) -> {});
     }
 
     @Override
-    public void patchAndCacheStatus(CR resource) {
+    public void patchAndCacheStatus(CR resource, KubernetesClient client) {
         statusCache.put(
-                getKey(resource),
+                ResourceID.fromResource(resource),
                 objectMapper.convertValue(resource.getStatus(), ObjectNode.class));
     }
 }
