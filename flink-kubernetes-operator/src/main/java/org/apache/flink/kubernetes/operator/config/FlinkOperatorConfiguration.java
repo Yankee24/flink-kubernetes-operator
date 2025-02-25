@@ -19,22 +19,34 @@
 package org.apache.flink.kubernetes.operator.config;
 
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricOptions;
 import org.apache.flink.kubernetes.operator.utils.EnvUtils;
 
-import io.javaoperatorsdk.operator.api.config.RetryConfiguration;
+import io.fabric8.kubernetes.api.model.DeletionPropagation;
+import io.javaoperatorsdk.operator.api.config.LeaderElectionConfiguration;
+import io.javaoperatorsdk.operator.processing.event.rate.LinearRateLimiter;
+import io.javaoperatorsdk.operator.processing.event.rate.RateLimiter;
+import io.javaoperatorsdk.operator.processing.retry.GenericRetry;
 import lombok.Value;
+import org.apache.commons.lang3.StringUtils;
 
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+
+import static org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricOptions.OPERATOR_KUBERNETES_SLOW_REQUEST_THRESHOLD;
+import static org.apache.flink.kubernetes.operator.utils.EnvUtils.ENV_WATCH_NAMESPACES;
 
 /** Configuration class for operator. */
 @Value
 public class FlinkOperatorConfiguration {
 
     private static final String NAMESPACES_SPLITTER_KEY = "\\s*,\\s*";
+    private static final String ENV_KUBERNETES_SERVICE_HOST = "KUBERNETES_SERVICE_HOST";
 
     Duration reconcileInterval;
     int reconcilerMaxParallelism;
@@ -47,13 +59,24 @@ public class FlinkOperatorConfiguration {
     boolean josdkMetricsEnabled;
     int metricsHistogramSampleSize;
     boolean kubernetesClientMetricsEnabled;
+    boolean kubernetesClientMetricsHttpResponseCodeGroupsEnabled;
     Duration flinkCancelJobTimeout;
     Duration flinkShutdownClusterTimeout;
     String artifactsBaseDir;
     Integer savepointHistoryCountThreshold;
     Duration savepointHistoryAgeThreshold;
-    RetryConfiguration retryConfiguration;
+    GenericRetry retryConfiguration;
+    RateLimiter<?> rateLimiter;
+    boolean exceptionStackTraceEnabled;
+    int exceptionStackTraceLengthThreshold;
+    int exceptionFieldLengthThreshold;
+    int exceptionThrowableCountThreshold;
+    Map<String, String> exceptionLabelMapper;
     String labelSelector;
+    LeaderElectionConfiguration leaderElectionConfiguration;
+    DeletionPropagation deletionPropagation;
+    boolean snapshotResourcesEnabled;
+    Duration slowRequestThreshold;
 
     public static FlinkOperatorConfiguration fromConfiguration(Configuration operatorConfig) {
         Duration reconcileInterval =
@@ -95,19 +118,47 @@ public class FlinkOperatorConfiguration {
                         KubernetesOperatorConfigOptions
                                 .OPERATOR_SAVEPOINT_HISTORY_MAX_AGE_THRESHOLD);
 
+        Boolean exceptionStackTraceEnabled =
+                operatorConfig.get(
+                        KubernetesOperatorConfigOptions.OPERATOR_EXCEPTION_STACK_TRACE_ENABLED);
+        int exceptionStackTraceLengthThreshold =
+                operatorConfig.get(
+                        KubernetesOperatorConfigOptions.OPERATOR_EXCEPTION_STACK_TRACE_MAX_LENGTH);
+        int exceptionFieldLengthThreshold =
+                operatorConfig.get(
+                        KubernetesOperatorConfigOptions.OPERATOR_EXCEPTION_FIELD_MAX_LENGTH);
+        int exceptionThrowableCountThreshold =
+                operatorConfig.get(
+                        KubernetesOperatorConfigOptions
+                                .OPERATOR_EXCEPTION_THROWABLE_LIST_MAX_COUNT);
+        Map<String, String> exceptionLabelMapper =
+                operatorConfig.get(KubernetesOperatorConfigOptions.OPERATOR_EXCEPTION_LABEL_MAPPER);
+
         String flinkServiceHostOverride = null;
-        if (EnvUtils.get(EnvUtils.ENV_KUBERNETES_SERVICE_HOST).isEmpty()) {
+        if (getEnv(ENV_KUBERNETES_SERVICE_HOST).isEmpty()) {
             // not running in k8s, simplify local development
             flinkServiceHostOverride = "localhost";
         }
-        var watchedNamespaces =
-                new HashSet<>(
-                        Arrays.asList(
-                                operatorConfig
-                                        .get(
-                                                KubernetesOperatorConfigOptions
-                                                        .OPERATOR_WATCHED_NAMESPACES)
-                                        .split(NAMESPACES_SPLITTER_KEY)));
+        Set<String> watchedNamespaces = null;
+        if (EnvUtils.get(ENV_WATCH_NAMESPACES).isEmpty()) {
+            // if the env var is not set use the config file, the default if neither set is
+            // all namespaces
+            watchedNamespaces =
+                    new HashSet<>(
+                            Arrays.asList(
+                                    operatorConfig
+                                            .get(
+                                                    KubernetesOperatorConfigOptions
+                                                            .OPERATOR_WATCHED_NAMESPACES)
+                                            .split(NAMESPACES_SPLITTER_KEY)));
+        } else {
+            watchedNamespaces =
+                    new HashSet<>(
+                            Arrays.asList(
+                                    EnvUtils.get(ENV_WATCH_NAMESPACES)
+                                            .get()
+                                            .split(NAMESPACES_SPLITTER_KEY)));
+        }
 
         boolean dynamicNamespacesEnabled =
                 operatorConfig.get(
@@ -120,14 +171,29 @@ public class FlinkOperatorConfiguration {
                 operatorConfig.get(
                         KubernetesOperatorMetricOptions.OPERATOR_KUBERNETES_CLIENT_METRICS_ENABLED);
 
+        boolean kubernetesClientMetricsHttpResponseCodeGroupsEnabled =
+                operatorConfig.get(
+                        KubernetesOperatorMetricOptions
+                                .OPERATOR_KUBERNETES_CLIENT_METRICS_HTTP_RESPONSE_CODE_GROUPS_ENABLED);
+
         int metricsHistogramSampleSize =
                 operatorConfig.get(
                         KubernetesOperatorMetricOptions.OPERATOR_METRICS_HISTOGRAM_SAMPLE_SIZE);
 
-        RetryConfiguration retryConfiguration = new FlinkOperatorRetryConfiguration(operatorConfig);
+        GenericRetry retryConfiguration = getRetryConfig(operatorConfig);
+        RateLimiter rateLimiter = getRateLimiter(operatorConfig);
 
         String labelSelector =
                 operatorConfig.getString(KubernetesOperatorConfigOptions.OPERATOR_LABEL_SELECTOR);
+
+        DeletionPropagation deletionPropagation =
+                operatorConfig.get(KubernetesOperatorConfigOptions.RESOURCE_DELETION_PROPAGATION);
+
+        boolean snapshotResourcesEnabled =
+                operatorConfig.get(KubernetesOperatorConfigOptions.SNAPSHOT_RESOURCE_ENABLED);
+
+        Duration slowRequestThreshold =
+                operatorConfig.get(OPERATOR_KUBERNETES_SLOW_REQUEST_THRESHOLD);
 
         return new FlinkOperatorConfiguration(
                 reconcileInterval,
@@ -141,52 +207,81 @@ public class FlinkOperatorConfiguration {
                 josdkMetricsEnabled,
                 metricsHistogramSampleSize,
                 kubernetesClientMetricsEnabled,
+                kubernetesClientMetricsHttpResponseCodeGroupsEnabled,
                 flinkCancelJobTimeout,
                 flinkShutdownClusterTimeout,
                 artifactsBaseDir,
                 savepointHistoryCountThreshold,
                 savepointHistoryAgeThreshold,
                 retryConfiguration,
-                labelSelector);
+                rateLimiter,
+                exceptionStackTraceEnabled,
+                exceptionStackTraceLengthThreshold,
+                exceptionFieldLengthThreshold,
+                exceptionThrowableCountThreshold,
+                exceptionLabelMapper,
+                labelSelector,
+                getLeaderElectionConfig(operatorConfig),
+                deletionPropagation,
+                snapshotResourcesEnabled,
+                slowRequestThreshold);
     }
 
-    /** Enables configurable retry mechanism for reconciliation errors. */
-    protected static class FlinkOperatorRetryConfiguration implements RetryConfiguration {
-        private final int maxAttempts;
-        private final long initialInterval;
-        private final double intervalMultiplier;
+    private static GenericRetry getRetryConfig(Configuration conf) {
+        var genericRetry =
+                new GenericRetry()
+                        .setMaxAttempts(
+                                conf.getInteger(
+                                        KubernetesOperatorConfigOptions
+                                                .OPERATOR_RETRY_MAX_ATTEMPTS))
+                        .setInitialInterval(
+                                conf.get(
+                                                KubernetesOperatorConfigOptions
+                                                        .OPERATOR_RETRY_INITIAL_INTERVAL)
+                                        .toMillis())
+                        .setIntervalMultiplier(
+                                conf.getDouble(
+                                        KubernetesOperatorConfigOptions
+                                                .OPERATOR_RETRY_INTERVAL_MULTIPLIER));
 
-        public FlinkOperatorRetryConfiguration(Configuration operatorConfig) {
-            maxAttempts =
-                    operatorConfig.getInteger(
-                            KubernetesOperatorConfigOptions.OPERATOR_RETRY_MAX_ATTEMPTS);
-            initialInterval =
-                    operatorConfig
-                            .get(KubernetesOperatorConfigOptions.OPERATOR_RETRY_INITIAL_INTERVAL)
-                            .toMillis();
-            intervalMultiplier =
-                    operatorConfig.getDouble(
-                            KubernetesOperatorConfigOptions.OPERATOR_RETRY_INTERVAL_MULTIPLIER);
+        if (conf.contains(KubernetesOperatorConfigOptions.OPERATOR_RETRY_MAX_INTERVAL)) {
+            genericRetry.setMaxInterval(
+                    conf.get(KubernetesOperatorConfigOptions.OPERATOR_RETRY_MAX_INTERVAL)
+                            .toMillis());
+        } else {
+            genericRetry.withoutMaxInterval();
+        }
+        return genericRetry;
+    }
+
+    private static RateLimiter<?> getRateLimiter(Configuration conf) {
+        return new LinearRateLimiter(
+                conf.get(KubernetesOperatorConfigOptions.OPERATOR_RATE_LIMITER_PERIOD),
+                conf.get(KubernetesOperatorConfigOptions.OPERATOR_RATE_LIMITER_LIMIT));
+    }
+
+    private static LeaderElectionConfiguration getLeaderElectionConfig(Configuration conf) {
+        if (!conf.get(KubernetesOperatorConfigOptions.OPERATOR_LEADER_ELECTION_ENABLED)) {
+            return null;
         }
 
-        @Override
-        public int getMaxAttempts() {
-            return maxAttempts;
-        }
+        return new LeaderElectionConfiguration(
+                conf.getOptional(
+                                KubernetesOperatorConfigOptions.OPERATOR_LEADER_ELECTION_LEASE_NAME)
+                        .orElseThrow(
+                                () ->
+                                        new IllegalConfigurationException(
+                                                KubernetesOperatorConfigOptions
+                                                                .OPERATOR_LEADER_ELECTION_LEASE_NAME
+                                                                .key()
+                                                        + " must be defined when operator leader election is enabled.")),
+                null,
+                conf.get(KubernetesOperatorConfigOptions.OPERATOR_LEADER_ELECTION_LEASE_DURATION),
+                conf.get(KubernetesOperatorConfigOptions.OPERATOR_LEADER_ELECTION_RENEW_DEADLINE),
+                conf.get(KubernetesOperatorConfigOptions.OPERATOR_LEADER_ELECTION_RETRY_PERIOD));
+    }
 
-        @Override
-        public long getInitialInterval() {
-            return initialInterval;
-        }
-
-        @Override
-        public double getIntervalMultiplier() {
-            return intervalMultiplier;
-        }
-
-        @Override
-        public long getMaxInterval() {
-            return (long) (initialInterval * Math.pow(intervalMultiplier, maxAttempts));
-        }
+    private static Optional<String> getEnv(String key) {
+        return Optional.ofNullable(StringUtils.getIfBlank(System.getenv().get(key), () -> null));
     }
 }

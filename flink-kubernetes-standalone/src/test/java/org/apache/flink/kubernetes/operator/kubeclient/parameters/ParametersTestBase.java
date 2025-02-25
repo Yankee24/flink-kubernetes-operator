@@ -22,16 +22,15 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.kubeclient.FlinkPod;
 import org.apache.flink.kubernetes.operator.kubeclient.utils.TestUtils;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.Container;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.ContainerBuilder;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.ContainerPortBuilder;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.EnvVar;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.EnvVarBuilder;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.LocalObjectReference;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.PodBuilder;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.ResourceRequirements;
 import org.apache.flink.kubernetes.utils.KubernetesUtils;
-
-import io.fabric8.kubernetes.api.model.Container;
-import io.fabric8.kubernetes.api.model.ContainerBuilder;
-import io.fabric8.kubernetes.api.model.ContainerPortBuilder;
-import io.fabric8.kubernetes.api.model.EnvVar;
-import io.fabric8.kubernetes.api.model.EnvVarBuilder;
-import io.fabric8.kubernetes.api.model.LocalObjectReference;
-import io.fabric8.kubernetes.api.model.PodBuilder;
-import io.fabric8.kubernetes.api.model.ResourceRequirements;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -73,6 +72,9 @@ public class ParametersTestBase {
             TestUtils.generateTestStringStringMap("template-node-selector", "value", 2);
 
     protected final List<String> templateImagePullSecrets = Arrays.asList("ts1", "ts2", "ts3");
+
+    protected final Map<String, String> flinkDeploymentOwnerReference =
+            TestUtils.generateTestOwnerReferenceMap("FlinkDeployment");
 
     private static final String SECRETS = "ssl-cert:/etc/ssl";
 
@@ -141,5 +143,8 @@ public class ParametersTestBase {
         flinkConfig.set(KubernetesConfigOptions.JOB_MANAGER_NODE_SELECTOR, userNodeSelectors);
         flinkConfig.set(KubernetesConfigOptions.CONTAINER_IMAGE_PULL_SECRETS, userImagePullSecrets);
         flinkConfig.setString(KubernetesConfigOptions.KUBERNETES_SECRETS.key(), SECRETS);
+        flinkConfig.set(
+                KubernetesConfigOptions.JOB_MANAGER_OWNER_REFERENCE,
+                List.of(flinkDeploymentOwnerReference));
     }
 }

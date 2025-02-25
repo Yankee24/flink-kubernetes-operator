@@ -23,19 +23,23 @@ import org.apache.flink.kubernetes.operator.config.FlinkOperatorConfiguration;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesClientMetrics;
 import org.apache.flink.metrics.MetricGroup;
 
+import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.client.Config;
-import io.fabric8.kubernetes.client.DefaultKubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClient;
-import io.fabric8.kubernetes.client.okhttp.OkHttpClientFactory;
-import io.fabric8.kubernetes.client.okhttp.OkHttpClientImpl;
+import io.fabric8.kubernetes.client.KubernetesClientBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Kubernetes client utils. */
 public class KubernetesClientUtils {
 
+    private static final Logger LOG = LoggerFactory.getLogger(KubernetesClientUtils.class);
+
+    private static final String METRICS_INTERCEPTOR_NAME = "KubernetesClientMetrics";
+
     public static KubernetesClient getKubernetesClient(
             FlinkOperatorConfiguration operatorConfig, MetricGroup metricGroup) {
-        return getKubernetesClient(
-                operatorConfig, metricGroup, new DefaultKubernetesClient().getConfiguration());
+        return getKubernetesClient(operatorConfig, metricGroup, null);
     }
 
     @VisibleForTesting
@@ -43,16 +47,34 @@ public class KubernetesClientUtils {
             FlinkOperatorConfiguration operatorConfig,
             MetricGroup metricGroup,
             Config kubernetesClientConfig) {
-        var httpClientBuilder =
-                new OkHttpClientFactory()
-                        .createHttpClient(kubernetesClientConfig)
-                        .getOkHttpClient()
-                        .newBuilder();
+
+        var clientBuilder = new KubernetesClientBuilder().withConfig(kubernetesClientConfig);
+
         if (operatorConfig.isKubernetesClientMetricsEnabled()) {
-            httpClientBuilder.addInterceptor(
-                    new KubernetesClientMetrics(metricGroup, operatorConfig));
+            clientBuilder.withHttpClientBuilderConsumer(
+                    httpCLientBuilder ->
+                            httpCLientBuilder.addOrReplaceInterceptor(
+                                    METRICS_INTERCEPTOR_NAME,
+                                    new KubernetesClientMetrics(metricGroup, operatorConfig)));
         }
-        return new DefaultKubernetesClient(
-                new OkHttpClientImpl(httpClientBuilder.build()), kubernetesClientConfig);
+
+        return clientBuilder.build();
+    }
+
+    /**
+     * Checks if the class for a Custom Resource is installed in the current Kubernetes cluster.
+     * TODO: remove method when FlinkStateSnapshot CRD is made mandatory
+     *
+     * @param clazz class of Custom Resource
+     * @return true if the CRD present in the Kubernetes cluster
+     */
+    public static boolean isCrdInstalled(Class<? extends HasMetadata> clazz) {
+        try (var client = new KubernetesClientBuilder().build()) {
+            client.resources(clazz).list().getItems();
+            return true;
+        } catch (Throwable t) {
+            LOG.debug("Could not find CRD {}", clazz.getSimpleName());
+            return false;
+        }
     }
 }

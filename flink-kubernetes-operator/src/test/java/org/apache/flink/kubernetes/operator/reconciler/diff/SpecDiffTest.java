@@ -17,26 +17,39 @@
 
 package org.apache.flink.kubernetes.operator.reconciler.diff;
 
+import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.configuration.CoreOptions;
+import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.kubernetes.operator.TestUtils;
+import org.apache.flink.kubernetes.operator.api.diff.DiffType;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkSessionJobSpec;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
+import org.apache.flink.kubernetes.operator.api.spec.IngressSpec;
+import org.apache.flink.kubernetes.operator.api.spec.JobState;
+import org.apache.flink.kubernetes.operator.api.spec.KubernetesDeploymentMode;
+import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
+import org.apache.flink.kubernetes.operator.api.utils.BaseTestUtils;
+import org.apache.flink.kubernetes.operator.api.utils.SpecUtils;
 import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkDeploymentSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkSessionJobSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkVersion;
-import org.apache.flink.kubernetes.operator.crd.spec.IngressSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.JobState;
-import org.apache.flink.kubernetes.operator.crd.spec.KubernetesDeploymentMode;
-import org.apache.flink.kubernetes.operator.crd.spec.UpgradeMode;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.fabric8.kubernetes.api.model.HostAlias;
+import io.fabric8.kubernetes.api.model.ObjectMeta;
+import io.fabric8.kubernetes.api.model.PodTemplateSpec;
+import lombok.Value;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions.OPERATOR_RECONCILE_INTERVAL;
 import static org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricOptions.SCOPE_NAMING_KUBERNETES_OPERATOR;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Spec diff test. */
 public class SpecDiffTest {
@@ -44,23 +57,24 @@ public class SpecDiffTest {
     @Test
     public void testFlinkDeploymentSpecChanges() {
         var left = new FlinkDeploymentSpec();
-        var right = ReconciliationUtils.clone(left);
-        var diff = left.diff(right);
+        var right = SpecUtils.clone(left);
+        var diff =
+                new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.IGNORE, diff.getType());
         assertEquals(0, diff.getNumDiffs());
 
-        left = TestUtils.buildSessionCluster().getSpec();
-        right = ReconciliationUtils.clone(left);
-        diff = left.diff(right);
+        left = BaseTestUtils.buildSessionCluster().getSpec();
+        right = SpecUtils.clone(left);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.IGNORE, diff.getType());
         assertEquals(0, diff.getNumDiffs());
 
-        left = TestUtils.buildApplicationCluster().getSpec();
-        left.setPodTemplate(TestUtils.getTestPod("localhost", "v1", List.of()));
+        left = BaseTestUtils.buildApplicationCluster().getSpec();
+        left.setPodTemplate(BaseTestUtils.getTestPodTemplate("localhost", List.of()));
         left.setIngress(IngressSpec.builder().template("template").build());
 
-        right = ReconciliationUtils.clone(left);
-        diff = left.diff(right);
+        right = SpecUtils.clone(left);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.IGNORE, diff.getType());
         assertEquals(0, diff.getNumDiffs());
 
@@ -72,20 +86,28 @@ public class SpecDiffTest {
         right.getFlinkConfiguration().put(OPERATOR_RECONCILE_INTERVAL.key(), "100 SECONDS");
         right.getFlinkConfiguration().put(SCOPE_NAMING_KUBERNETES_OPERATOR.key(), "foo.bar");
         right.getFlinkConfiguration().put(CoreOptions.DEFAULT_PARALLELISM.key(), "100");
+        right.getFlinkConfiguration().put(AutoScalerOptions.METRICS_WINDOW.key(), "1234m");
 
-        diff = left.diff(right);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.IGNORE, diff.getType());
-        assertEquals(7, diff.getNumDiffs());
+        assertEquals(8, diff.getNumDiffs());
 
         right.getFlinkConfiguration().remove(SCOPE_NAMING_KUBERNETES_OPERATOR.key());
+        right.getFlinkConfiguration().remove(AutoScalerOptions.METRICS_WINDOW.key());
 
-        diff = left.diff(right);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.IGNORE, diff.getType());
         assertEquals(6, diff.getNumDiffs());
 
         right.getJob().setParallelism(100);
 
-        diff = left.diff(right);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.UPGRADE, diff.getType());
+        assertEquals(7, diff.getNumDiffs());
+
+        diff =
+                new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.STANDALONE, left, right)
+                        .build();
         assertEquals(DiffType.SCALE, diff.getType());
         assertEquals(7, diff.getNumDiffs());
 
@@ -96,16 +118,16 @@ public class SpecDiffTest {
         right.setMode(KubernetesDeploymentMode.STANDALONE);
         right.setLogConfiguration(Map.of("foo", "bar"));
 
-        diff = left.diff(right);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.UPGRADE, diff.getType());
         assertEquals(13, diff.getNumDiffs());
 
         right.getJobManager().getResource().setMemory("999m");
         right.getTaskManager().setReplicas(999);
-        right.getPodTemplate().setApiVersion("v2");
+        right.getPodTemplate().setMetadata(new ObjectMeta());
         right.getIngress().setTemplate("none");
 
-        diff = left.diff(right);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.UPGRADE, diff.getType());
         assertEquals(17, diff.getNumDiffs());
 
@@ -114,28 +136,61 @@ public class SpecDiffTest {
         right.getJob().setArgs(new String[] {"foo", "bar"});
         right.getJob().setState(JobState.SUSPENDED);
 
-        diff = left.diff(right);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.UPGRADE, diff.getType());
         assertEquals(21, diff.getNumDiffs());
 
         right.getFlinkConfiguration().put(CoreOptions.FLINK_TM_JVM_OPTIONS.key(), "-Dfoo=bar");
 
-        diff = left.diff(right);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.UPGRADE, diff.getType());
         assertEquals(22, diff.getNumDiffs());
+        left.setMode(KubernetesDeploymentMode.STANDALONE);
+        left.getTaskManager().setReplicas(2);
+        left.getTaskManager().getResource().setMemory("1024");
+        right = SpecUtils.clone(left);
+        right.getTaskManager().setReplicas(3);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.UPGRADE, diff.getType());
+        diff =
+                new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.STANDALONE, left, right)
+                        .build();
+        assertEquals(DiffType.SCALE, diff.getType());
+        assertEquals(1, diff.getNumDiffs());
+        right.getTaskManager().getResource().setMemory("2048");
+        right.getTaskManager().setReplicas(4);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.UPGRADE, diff.getType());
+        assertEquals(2, diff.getNumDiffs());
+
+        // verify parallelism override handling for native/standalone
+        left = TestUtils.buildApplicationCluster().getSpec();
+        right = TestUtils.buildApplicationCluster().getSpec();
+        left.getFlinkConfiguration().put(PipelineOptions.PARALLELISM_OVERRIDES.key(), "new");
+
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.SCALE, diff.getType());
+        assertEquals(1, diff.getNumDiffs());
+
+        diff =
+                new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.STANDALONE, left, right)
+                        .build();
+        assertEquals(DiffType.UPGRADE, diff.getType());
+        assertEquals(1, diff.getNumDiffs());
     }
 
     @Test
     public void testFlinkSessionJobSpecChanges() {
         var left = new FlinkSessionJobSpec();
-        var right = ReconciliationUtils.clone(left);
-        var diff = left.diff(right);
+        var right = SpecUtils.clone(left);
+        var diff =
+                new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.IGNORE, diff.getType());
         assertEquals(0, diff.getNumDiffs());
 
-        left = TestUtils.buildSessionJob().getSpec();
-        right = ReconciliationUtils.clone(left);
-        diff = left.diff(right);
+        left = BaseTestUtils.buildSessionJob().getSpec();
+        right = SpecUtils.clone(left);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.IGNORE, diff.getType());
         assertEquals(0, diff.getNumDiffs());
 
@@ -147,13 +202,19 @@ public class SpecDiffTest {
         right.getFlinkConfiguration()
                 .put(KubernetesOperatorConfigOptions.JAR_ARTIFACT_HTTP_HEADER.key(), "changed");
 
-        diff = left.diff(right);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.IGNORE, diff.getType());
         assertEquals(5, diff.getNumDiffs());
 
         right.getJob().setParallelism(100);
 
-        diff = left.diff(right);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.UPGRADE, diff.getType());
+        assertEquals(6, diff.getNumDiffs());
+
+        diff =
+                new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.STANDALONE, left, right)
+                        .build();
         assertEquals(DiffType.SCALE, diff.getType());
         assertEquals(6, diff.getNumDiffs());
 
@@ -163,8 +224,184 @@ public class SpecDiffTest {
         right.getJob().setArgs(new String[] {"foo", "bar"});
         right.getJob().setState(JobState.SUSPENDED);
 
-        diff = left.diff(right);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
         assertEquals(DiffType.UPGRADE, diff.getType());
         assertEquals(11, diff.getNumDiffs());
+    }
+
+    @Test
+    public void testPodTemplateChanges() throws JsonProcessingException {
+        var left = BaseTestUtils.buildApplicationCluster().getSpec();
+        left.setPodTemplate(BaseTestUtils.getTestPodTemplate("localhost1", List.of()));
+        left.getPodTemplate()
+                .getSpec()
+                .getHostAliases()
+                .add(new HostAlias(List.of("host1", "host2"), "ip"));
+        left.setImage("img1");
+        IngressSpec ingressSpec = new IngressSpec();
+        ingressSpec.setTemplate("temp");
+        left.setIngress(ingressSpec);
+        var right = BaseTestUtils.buildApplicationCluster().getSpec();
+        right.setPodTemplate(BaseTestUtils.getTestPodTemplate("localhost2", List.of()));
+        right.getPodTemplate()
+                .getSpec()
+                .getHostAliases()
+                .add(new HostAlias(List.of("host1"), "ip"));
+        right.setImage("img2");
+        right.setRestartNonce(1L);
+
+        var diff =
+                new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.UPGRADE, diff.getType());
+        assertEquals(
+                "Diff: FlinkDeploymentSpec[image : img1 -> img2, "
+                        + "ingress : {..} -> null, "
+                        + "podTemplate.spec.hostAliases.0.hostnames.1 : host2 -> null, "
+                        + "podTemplate.spec.hostname : localhost1 -> localhost2, "
+                        + "restartNonce : null -> 1]",
+                diff.toString());
+
+        // Make sure removed fields dont trigger upgrade
+        String oldTemplate =
+                "{\"apiVersion\": \"v1\", \"metadata\": {\"labels\" : {\"l1\": \"v1\"}}, \"spec\": {\"hostname\": \"h\"}}";
+
+        String newTemplate =
+                "{\"metadata\": {\"labels\" : {\"l1\": \"v1\"}}, \"spec\": {\"hostname\": \"h\"}}";
+
+        var om = new ObjectMapper();
+        left = BaseTestUtils.buildApplicationCluster().getSpec();
+        left.setPodTemplate(om.readValue(oldTemplate, PodTemplateSpec.class));
+        right = BaseTestUtils.buildApplicationCluster().getSpec();
+        right.setPodTemplate(om.readValue(newTemplate, PodTemplateSpec.class));
+
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.IGNORE, diff.getType());
+
+        left = BaseTestUtils.buildApplicationCluster().getSpec();
+        left.getJobManager().setPodTemplate(om.readValue(oldTemplate, PodTemplateSpec.class));
+        right = BaseTestUtils.buildApplicationCluster().getSpec();
+        right.getJobManager().setPodTemplate(om.readValue(newTemplate, PodTemplateSpec.class));
+
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.IGNORE, diff.getType());
+    }
+
+    @Test
+    public void testOnNullIgnore() {
+        var left = TestUtils.buildApplicationCluster().getSpec();
+        left.setRestartNonce(null);
+
+        var right = ReconciliationUtils.clone(left);
+        right.setRestartNonce(1L);
+
+        assertEquals(
+                DiffType.UPGRADE,
+                new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right)
+                        .build()
+                        .getType());
+
+        left.setRestartNonce(1L);
+        right.setRestartNonce(null);
+
+        assertEquals(
+                DiffType.IGNORE,
+                new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right)
+                        .build()
+                        .getType());
+    }
+
+    @Test
+    public void testArrayDiffs() {
+        var left =
+                new TestClass(
+                        new boolean[] {true},
+                        new byte[] {0},
+                        new char[] {'a'},
+                        new double[] {0.},
+                        new float[] {0f},
+                        new int[] {0},
+                        new long[] {0L},
+                        new short[] {2},
+                        new Object[] {"a"});
+        var right =
+                new TestClass(
+                        new boolean[] {true},
+                        new byte[] {0},
+                        new char[] {'a'},
+                        new double[] {0.},
+                        new float[] {0f},
+                        new int[] {0},
+                        new long[] {0L},
+                        new short[] {2},
+                        new Object[] {"a"});
+
+        var diff =
+                new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertTrue(diff.getDiffList().isEmpty());
+
+        right =
+                new TestClass(
+                        new boolean[] {false},
+                        new byte[] {0},
+                        new char[] {'a'},
+                        new double[] {0.},
+                        new float[] {0f},
+                        new int[] {0},
+                        new long[] {0L},
+                        new short[] {2},
+                        new Object[] {"b"});
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(2, diff.getNumDiffs());
+        assertEquals(
+                Map.of("f0", DiffType.UPGRADE, "f8", DiffType.UPGRADE),
+                diff.getDiffList().stream()
+                        .collect(Collectors.toMap(Diff::getFieldName, Diff::getType)));
+    }
+
+    @Test
+    public void testSavepointNonceDiff() {
+        var left = TestUtils.buildApplicationCluster().getSpec();
+        var right = SpecUtils.clone(left);
+        var diff =
+                new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.IGNORE, diff.getType());
+        assertEquals(0, diff.getNumDiffs());
+
+        right.getJob().setSavepointRedeployNonce(1L);
+        right.getJob().setParallelism(123);
+
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.SAVEPOINT_REDEPLOY, diff.getType());
+        assertEquals(2, diff.getNumDiffs());
+
+        left = SpecUtils.clone(right);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.IGNORE, diff.getType());
+        assertEquals(0, diff.getNumDiffs());
+
+        right.getJob().setSavepointRedeployNonce(2L);
+
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.SAVEPOINT_REDEPLOY, diff.getType());
+        assertEquals(1, diff.getNumDiffs());
+
+        left = SpecUtils.clone(right);
+        right.getJob().setSavepointRedeployNonce(null);
+        diff = new ReflectiveDiffBuilder<>(KubernetesDeploymentMode.NATIVE, left, right).build();
+        assertEquals(DiffType.IGNORE, diff.getType());
+        assertEquals(0, diff.getNumDiffs());
+    }
+
+    @Value
+    private static class TestClass {
+        boolean[] f0;
+        byte[] f1;
+        char[] f2;
+        double[] f3;
+        float[] f4;
+        int[] f5;
+        long[] f6;
+        short[] f7;
+        Object[] f8;
     }
 }

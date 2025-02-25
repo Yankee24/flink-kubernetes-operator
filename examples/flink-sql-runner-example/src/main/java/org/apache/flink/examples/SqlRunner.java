@@ -27,6 +27,8 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Main class for executing SQL scripts. */
 public class SqlRunner {
@@ -38,6 +40,14 @@ public class SqlRunner {
 
     private static final String COMMENT_PATTERN = "(--.*)|(((\\/\\*)+?[\\w\\W]+?(\\*\\/)+))";
 
+    private static final Pattern SET_STATEMENT_PATTERN =
+            Pattern.compile("SET\\s+'(\\S+)'\\s+=\\s+'(.*)';", Pattern.CASE_INSENSITIVE);
+
+    private static final String BEGIN_CERTIFICATE = "-----BEGIN CERTIFICATE-----";
+    private static final String END_CERTIFICATE = "-----END CERTIFICATE-----";
+    private static final String ESCAPED_BEGIN_CERTIFICATE = "======BEGIN CERTIFICATE=====";
+    private static final String ESCAPED_END_CERTIFICATE = "=====END CERTIFICATE=====";
+
     public static void main(String[] args) throws Exception {
         if (args.length != 1) {
             throw new Exception("Exactly one argument is expected.");
@@ -48,13 +58,29 @@ public class SqlRunner {
         var tableEnv = TableEnvironment.create(new Configuration());
 
         for (String statement : statements) {
-            LOG.info("Executing:\n{}", statement);
-            tableEnv.executeSql(statement);
+            Matcher setMatcher = SET_STATEMENT_PATTERN.matcher(statement.trim());
+
+            if (setMatcher.matches()) {
+                // Handle SET statements
+                String key = setMatcher.group(1);
+                String value = setMatcher.group(2);
+                tableEnv.getConfig().getConfiguration().setString(key, value);
+            } else {
+                LOG.info("Executing:\n{}", statement);
+                tableEnv.executeSql(statement);
+            }
         }
     }
 
     public static List<String> parseStatements(String script) {
-        var formatted = formatSqlFile(script).replaceAll(COMMENT_PATTERN, "");
+        var formatted =
+                formatSqlFile(script)
+                        .replaceAll(BEGIN_CERTIFICATE, ESCAPED_BEGIN_CERTIFICATE)
+                        .replaceAll(END_CERTIFICATE, ESCAPED_END_CERTIFICATE)
+                        .replaceAll(COMMENT_PATTERN, "")
+                        .replaceAll(ESCAPED_BEGIN_CERTIFICATE, BEGIN_CERTIFICATE)
+                        .replaceAll(ESCAPED_END_CERTIFICATE, END_CERTIFICATE);
+
         var statements = new ArrayList<String>();
 
         StringBuilder current = null;

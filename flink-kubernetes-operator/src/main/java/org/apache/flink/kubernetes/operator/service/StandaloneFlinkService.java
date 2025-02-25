@@ -23,23 +23,23 @@ import org.apache.flink.client.deployment.ClusterSpecification;
 import org.apache.flink.client.deployment.application.ApplicationConfiguration;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.SchedulerExecutionMode;
 import org.apache.flink.kubernetes.KubernetesClusterClientFactory;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.spec.JobSpec;
+import org.apache.flink.kubernetes.operator.artifact.ArtifactManager;
+import org.apache.flink.kubernetes.operator.config.FlinkOperatorConfiguration;
 import org.apache.flink.kubernetes.operator.config.Mode;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.spec.JobSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.UpgradeMode;
-import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
+import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.kubeclient.Fabric8FlinkStandaloneKubeClient;
 import org.apache.flink.kubernetes.operator.kubeclient.FlinkStandaloneKubeClient;
 import org.apache.flink.kubernetes.operator.standalone.KubernetesStandaloneClusterDescriptor;
 import org.apache.flink.kubernetes.operator.standalone.StandaloneKubernetesConfigOptionsInternal;
 import org.apache.flink.kubernetes.operator.utils.StandaloneKubernetesUtils;
-import org.apache.flink.kubernetes.utils.KubernetesUtils;
 import org.apache.flink.util.concurrent.ExecutorThreadFactory;
 
-import io.fabric8.kubernetes.api.model.ObjectMeta;
+import io.fabric8.kubernetes.api.model.DeletionPropagation;
 import io.fabric8.kubernetes.api.model.PodList;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import org.slf4j.Logger;
@@ -47,8 +47,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-
-import static org.apache.flink.kubernetes.utils.Constants.LABEL_CONFIGMAP_TYPE_HIGH_AVAILABILITY;
 
 /**
  * Implementation of {@link FlinkService} submitting and interacting with Standalone Kubernetes
@@ -59,8 +57,11 @@ public class StandaloneFlinkService extends AbstractFlinkService {
     private static final Logger LOG = LoggerFactory.getLogger(StandaloneFlinkService.class);
 
     public StandaloneFlinkService(
-            KubernetesClient kubernetesClient, FlinkConfigManager configManager) {
-        super(kubernetesClient, configManager);
+            KubernetesClient kubernetesClient,
+            ArtifactManager artifactManager,
+            ExecutorService executorService,
+            FlinkOperatorConfiguration operatorConfig) {
+        super(kubernetesClient, artifactManager, executorService, operatorConfig);
     }
 
     @Override
@@ -71,22 +72,17 @@ public class StandaloneFlinkService extends AbstractFlinkService {
     }
 
     @Override
-    public void submitSessionCluster(Configuration conf) throws Exception {
+    public void deploySessionCluster(Configuration conf) throws Exception {
         LOG.info("Deploying session cluster");
         submitClusterInternal(removeOperatorConfigs(conf), Mode.SESSION);
         LOG.info("Session cluster successfully deployed");
     }
 
     @Override
-    public void cancelJob(FlinkDeployment deployment, UpgradeMode upgradeMode, Configuration conf)
+    public CancelResult cancelJob(
+            FlinkDeployment deployment, SuspendMode suspendMode, Configuration conf)
             throws Exception {
-        cancelJob(deployment, upgradeMode, conf, true);
-    }
-
-    @Override
-    public void deleteClusterDeployment(
-            ObjectMeta meta, FlinkDeploymentStatus status, boolean deleteHaData) {
-        deleteClusterInternal(meta, deleteHaData);
+        return cancelJob(deployment, suspendMode, conf, true);
     }
 
     @Override
@@ -99,27 +95,21 @@ public class StandaloneFlinkService extends AbstractFlinkService {
     }
 
     @VisibleForTesting
-    protected FlinkStandaloneKubeClient createNamespacedKubeClient(
-            Configuration configuration, String namespace) {
+    protected FlinkStandaloneKubeClient createNamespacedKubeClient(Configuration configuration) {
         final int poolSize =
                 configuration.get(KubernetesConfigOptions.KUBERNETES_CLIENT_IO_EXECUTOR_POOL_SIZE);
 
-        ExecutorService executorService =
-                Executors.newFixedThreadPool(
+        var executorService =
+                Executors.newScheduledThreadPool(
                         poolSize,
                         new ExecutorThreadFactory("flink-kubeclient-io-for-standalone-service"));
 
-        return new Fabric8FlinkStandaloneKubeClient(
-                configuration,
-                Fabric8FlinkStandaloneKubeClient.createNamespacedKubeClient(namespace),
-                executorService);
+        return Fabric8FlinkStandaloneKubeClient.create(configuration, executorService);
     }
 
     protected void submitClusterInternal(Configuration conf, Mode mode)
             throws ClusterDeploymentException {
-        final String namespace = conf.get(KubernetesConfigOptions.NAMESPACE);
-
-        FlinkStandaloneKubeClient client = createNamespacedKubeClient(conf, namespace);
+        FlinkStandaloneKubeClient client = createNamespacedKubeClient(conf);
         try (final KubernetesStandaloneClusterDescriptor kubernetesClusterDescriptor =
                 new KubernetesStandaloneClusterDescriptor(conf, client)) {
             switch (mode) {
@@ -142,50 +132,44 @@ public class StandaloneFlinkService extends AbstractFlinkService {
         return new KubernetesClusterClientFactory().getClusterSpecification(conf);
     }
 
-    private void deleteClusterInternal(ObjectMeta meta, boolean deleteHaConfigmaps) {
-        final String clusterId = meta.getName();
-        final String namespace = meta.getNamespace();
+    @Override
+    protected void deleteClusterInternal(
+            String namespace,
+            String clusterId,
+            Configuration conf,
+            DeletionPropagation deletionPropagation) {
 
-        LOG.info("Deleting Flink Standalone cluster TM resources");
-        kubernetesClient
-                .apps()
-                .deployments()
-                .inNamespace(namespace)
-                .withName(StandaloneKubernetesUtils.getTaskManagerDeploymentName(clusterId))
-                .cascading(true)
-                .delete();
+        var jmDeployment =
+                kubernetesClient
+                        .apps()
+                        .deployments()
+                        .inNamespace(namespace)
+                        .withName(StandaloneKubernetesUtils.getJobManagerDeploymentName(clusterId));
+        var remainingTimeout =
+                deleteDeploymentBlocking(
+                        "JobManager",
+                        jmDeployment,
+                        deletionPropagation,
+                        operatorConfig.getFlinkShutdownClusterTimeout());
 
-        LOG.info("Deleting Flink Standalone cluster JM resources");
-        kubernetesClient
-                .apps()
-                .deployments()
-                .inNamespace(namespace)
-                .withName(StandaloneKubernetesUtils.getJobManagerDeploymentName(clusterId))
-                .cascading(true)
-                .delete();
-
-        if (deleteHaConfigmaps) {
-            // We need to wait for cluster shutdown otherwise HA configmaps might be recreated
-            waitForClusterShutdown(
-                    namespace,
-                    clusterId,
-                    configManager
-                            .getOperatorConfiguration()
-                            .getFlinkShutdownClusterTimeout()
-                            .toSeconds());
-            kubernetesClient
-                    .configMaps()
-                    .inNamespace(namespace)
-                    .withLabels(
-                            KubernetesUtils.getConfigMapLabels(
-                                    clusterId, LABEL_CONFIGMAP_TYPE_HIGH_AVAILABILITY))
-                    .delete();
-        }
+        var tmDeployment =
+                kubernetesClient
+                        .apps()
+                        .deployments()
+                        .inNamespace(namespace)
+                        .withName(
+                                StandaloneKubernetesUtils.getTaskManagerDeploymentName(clusterId));
+        deleteDeploymentBlocking(
+                "TaskManager", tmDeployment, deletionPropagation, remainingTimeout);
     }
 
     @Override
-    public boolean scale(ObjectMeta meta, JobSpec jobSpec, Configuration conf) {
-        if (conf.get(JobManagerOptions.SCHEDULER_MODE) == null) {
+    public boolean scale(FlinkResourceContext<?> ctx, Configuration deployConfig) {
+        var observeConfig = ctx.getObserveConfig();
+        var jobSpec = ctx.getResource().getSpec();
+        var meta = ctx.getResource().getMetadata();
+        if (observeConfig.get(JobManagerOptions.SCHEDULER_MODE) != SchedulerExecutionMode.REACTIVE
+                && jobSpec != null) {
             LOG.info("Reactive scaling is not enabled");
             return false;
         }
@@ -203,7 +187,8 @@ public class StandaloneFlinkService extends AbstractFlinkService {
 
         var actualReplicas = deployment.get().getSpec().getReplicas();
         var desiredReplicas =
-                conf.get(StandaloneKubernetesConfigOptionsInternal.KUBERNETES_TASKMANAGER_REPLICAS);
+                deployConfig.get(
+                        StandaloneKubernetesConfigOptionsInternal.KUBERNETES_TASKMANAGER_REPLICAS);
         if (actualReplicas != desiredReplicas) {
             LOG.info(
                     "Scaling TM replicas: actual({}) -> desired({})",

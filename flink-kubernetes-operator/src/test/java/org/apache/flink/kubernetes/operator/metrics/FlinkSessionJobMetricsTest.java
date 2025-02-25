@@ -19,8 +19,7 @@ package org.apache.flink.kubernetes.operator.metrics;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.TestUtils;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
-import org.apache.flink.kubernetes.operator.crd.FlinkSessionJob;
+import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,7 +29,9 @@ import static org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMet
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** @link FlinkSessionJobMetrics tests. */
+/**
+ * @link FlinkSessionJobMetrics tests.
+ */
 public class FlinkSessionJobMetricsTest {
 
     private final Configuration configuration = new Configuration();
@@ -42,7 +43,7 @@ public class FlinkSessionJobMetricsTest {
         listener = new TestingMetricListener(configuration);
         metricManager =
                 MetricManager.createFlinkSessionJobMetricManager(
-                        new FlinkConfigManager(configuration), listener.getMetricGroup());
+                        configuration, listener.getMetricGroup());
     }
 
     @Test
@@ -115,8 +116,7 @@ public class FlinkSessionJobMetricsTest {
         conf.set(OPERATOR_RESOURCE_METRICS_ENABLED, false);
         var listener = new TestingMetricListener(conf);
         var metricManager =
-                MetricManager.createFlinkSessionJobMetricManager(
-                        new FlinkConfigManager(conf), listener.getMetricGroup());
+                MetricManager.createFlinkSessionJobMetricManager(conf, listener.getMetricGroup());
 
         var metricId =
                 listener.getNamespaceMetricId(

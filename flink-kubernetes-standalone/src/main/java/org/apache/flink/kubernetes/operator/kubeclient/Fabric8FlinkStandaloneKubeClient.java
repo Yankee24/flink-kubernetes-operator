@@ -17,15 +17,17 @@
 
 package org.apache.flink.kubernetes.operator.kubeclient;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.kubeclient.Fabric8FlinkKubeClient;
 import org.apache.flink.kubernetes.operator.utils.StandaloneKubernetesUtils;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.DeletionPropagation;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.apps.Deployment;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.client.DefaultKubernetesClient;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.client.NamespacedKubernetesClient;
 
-import io.fabric8.kubernetes.api.model.apps.Deployment;
-import io.fabric8.kubernetes.client.DefaultKubernetesClient;
-import io.fabric8.kubernetes.client.NamespacedKubernetesClient;
-
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -35,10 +37,11 @@ public class Fabric8FlinkStandaloneKubeClient extends Fabric8FlinkKubeClient
 
     private final NamespacedKubernetesClient internalClient;
 
+    @VisibleForTesting
     public Fabric8FlinkStandaloneKubeClient(
             Configuration flinkConfig,
             NamespacedKubernetesClient client,
-            ExecutorService executorService) {
+            ScheduledExecutorService executorService) {
         super(flinkConfig, client, executorService);
         internalClient = checkNotNull(client);
     }
@@ -54,18 +57,22 @@ public class Fabric8FlinkStandaloneKubeClient extends Fabric8FlinkKubeClient
                 .apps()
                 .deployments()
                 .withName(StandaloneKubernetesUtils.getJobManagerDeploymentName(clusterId))
-                .cascading(true)
+                .withPropagationPolicy(DeletionPropagation.FOREGROUND)
                 .delete();
 
         this.internalClient
                 .apps()
                 .deployments()
                 .withName(StandaloneKubernetesUtils.getTaskManagerDeploymentName(clusterId))
-                .cascading(true)
+                .withPropagationPolicy(DeletionPropagation.FOREGROUND)
                 .delete();
     }
 
-    public static NamespacedKubernetesClient createNamespacedKubeClient(String namespace) {
-        return new DefaultKubernetesClient().inNamespace(namespace);
+    public static Fabric8FlinkStandaloneKubeClient create(
+            Configuration conf, ScheduledExecutorService executorService) {
+        var client =
+                new DefaultKubernetesClient()
+                        .inNamespace(conf.get(KubernetesConfigOptions.NAMESPACE));
+        return new Fabric8FlinkStandaloneKubeClient(conf, client, executorService);
     }
 }

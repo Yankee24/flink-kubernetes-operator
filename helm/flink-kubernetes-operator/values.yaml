@@ -26,8 +26,17 @@ image:
   repository: flink-kubernetes-operator
   pullPolicy: IfNotPresent
   tag: latest
+  # If image digest is set then it takes precedence and the image tag will be ignored
+  # digest: ""
 
 imagePullSecrets: []
+
+# Replicas must be 1 unless operator leader election is configured
+replicas: 1
+
+# Strategy type must be Recreate unless leader election is configured
+strategy:
+  type: Recreate
 
 rbac:
   create: true
@@ -50,14 +59,49 @@ rbac:
     name: "flink-role-binding"
 
 operatorPod:
+  priorityClassName: null
   annotations: {}
   labels: {}
+  # The env variables only apply to the operator container in the operator pod
+  # TODO: consider making this pod level env variables
   env:
   # - name: ""
   #   value: ""
+  # - name: ""
+  #   valueFrom:
+  #     configMapKeyRef:
+  #       name: ""
+  #       key: ""
   # dnsPolicy: ""
   # dnsConfig: {}
+  # Node labels and affinity for operator pod assignment
+  # https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/
+  envFrom:
+  # - configMapRef:
+  #     name: ""
+  nodeSelector: {}
 
+  affinity: {}
+  # Node tolerations for operator pod assignment
+  # https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/
+  tolerations: []
+  # Topology spread constrains
+  # https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
+  topologySpreadConstraints: []
+  resources: {}
+  # resources:
+  #   limits:
+  #     cpu: "250m"
+  #     memory: "512Mi"
+  #   requests:
+  #     cpu: "250m"
+  #     memory: "512Mi"
+  webhook:
+    resources: {}
+    container:
+      env:
+      # - name: ""
+      #   value: ""
 
 operatorServiceAccount:
   create: true
@@ -107,10 +151,17 @@ webhook:
   # passwordSecretRef:
   #   name: jks-password-secret
   #   key: password-key
+  serviceLabels: {}
 
 defaultConfiguration:
+  # If set to true, creates ConfigMaps/VolumeMounts. If set to false, no configuration will be created.
+  # All below fields will be ignored if create is set to false.
   create: true
-  # Set append to false to replace configuration files
+  # If set to true,
+  #      (1) loads the built-in default configuration
+  #      (2) appends the below flink-conf and logging configuration overrides
+  # If set to false, loads just the overrides as in (2).
+  # This option has not effect, if create is equal to false.
   append: true
   flink-conf.yaml: |+
     # Flink Config Overrides
@@ -149,3 +200,14 @@ operatorHealth:
   startupProbe:
     failureThreshold: 30
     periodSeconds: 10
+
+# Set postStart hook of the main container
+postStart: {}
+
+# Configuration for tls
+tls:
+  create: false
+  secretName: flink-operator-cert
+  secretKeyRef:
+    name: operator-certificate-password
+    key: password

@@ -18,6 +18,7 @@
 
 package org.apache.flink.kubernetes.operator.metrics;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.kubernetes.operator.config.FlinkOperatorConfiguration;
 import org.apache.flink.kubernetes.operator.metrics.OperatorMetricUtils.SynchronizedMeterView;
 import org.apache.flink.metrics.Counter;
@@ -25,15 +26,20 @@ import org.apache.flink.metrics.Histogram;
 import org.apache.flink.metrics.MeterView;
 import org.apache.flink.metrics.MetricGroup;
 
-import okhttp3.Interceptor;
-import okhttp3.Request;
-import okhttp3.Response;
+import io.fabric8.kubernetes.client.http.AsyncBody;
+import io.fabric8.kubernetes.client.http.BasicBuilder;
+import io.fabric8.kubernetes.client.http.HttpRequest;
+import io.fabric8.kubernetes.client.http.HttpResponse;
+import io.fabric8.kubernetes.client.http.Interceptor;
 
-import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 /** Kubernetes client metrics. */
 public class KubernetesClientMetrics implements Interceptor {
@@ -41,39 +47,66 @@ public class KubernetesClientMetrics implements Interceptor {
     public static final String KUBE_CLIENT_GROUP = "KubeClient";
     public static final String HTTP_REQUEST_GROUP = "HttpRequest";
     public static final String HTTP_REQUEST_FAILED_GROUP = "Failed";
+    public static final String HTTP_REQUEST_SLOW_GROUP = "Slow";
     public static final String HTTP_RESPONSE_GROUP = "HttpResponse";
+    public static final String HTTP_RESPONSE_1XX = "1xx";
+    public static final String HTTP_RESPONSE_2XX = "2xx";
+    public static final String HTTP_RESPONSE_3XX = "3xx";
+    public static final String HTTP_RESPONSE_4XX = "4xx";
+    public static final String HTTP_RESPONSE_5XX = "5xx";
     public static final String COUNTER = "Count";
     public static final String METER = "NumPerSecond";
     public static final String HISTO = "TimeNanos";
+    public static final String REQUEST_START_TIME_HEADER = "requestStartTimeNanos";
     private final Histogram responseLatency;
 
     private final MetricGroup requestMetricGroup;
     private final MetricGroup failedRequestMetricGroup;
+    private final MetricGroup slowRequestMetricGroup;
     private final MetricGroup responseMetricGroup;
 
     private final Counter requestCounter;
     private final Counter failedRequestCounter;
+    private final Counter slowRequestCounter;
     private final Counter responseCounter;
 
     private final SynchronizedMeterView requestRateMeter;
     private final SynchronizedMeterView requestFailedRateMeter;
     private final SynchronizedMeterView responseRateMeter;
 
-    private final Map<Integer, Counter> responseCodeCounters = new ConcurrentHashMap<>();
+    private final boolean httpResponseCodeGroupsEnabled;
+    private final List<SynchronizedMeterView> responseCodeGroupMeters = new ArrayList<>(5);
+    private final Map<Integer, SynchronizedMeterView> responseCodeMeters =
+            new ConcurrentHashMap<>();
     private final Map<String, Counter> requestMethodCounter = new ConcurrentHashMap<>();
+    private final LongSupplier nanoTimeSource;
+
+    private final Duration slowRequestThreshold;
 
     public KubernetesClientMetrics(
             MetricGroup parentGroup, FlinkOperatorConfiguration flinkOperatorConfiguration) {
+        this(parentGroup, flinkOperatorConfiguration, System::nanoTime);
+    }
+
+    public KubernetesClientMetrics(
+            MetricGroup parentGroup,
+            FlinkOperatorConfiguration flinkOperatorConfiguration,
+            LongSupplier nanoTimeSource) {
+        this.nanoTimeSource = nanoTimeSource;
         MetricGroup metricGroup = parentGroup.addGroup(KUBE_CLIENT_GROUP);
 
         this.requestMetricGroup = metricGroup.addGroup(HTTP_REQUEST_GROUP);
         this.failedRequestMetricGroup = requestMetricGroup.addGroup(HTTP_REQUEST_FAILED_GROUP);
+        this.slowRequestMetricGroup = requestMetricGroup.addGroup(HTTP_REQUEST_SLOW_GROUP);
         this.responseMetricGroup = metricGroup.addGroup(HTTP_RESPONSE_GROUP);
 
         this.requestCounter =
                 OperatorMetricUtils.synchronizedCounter(requestMetricGroup.counter(COUNTER));
         this.failedRequestCounter =
                 OperatorMetricUtils.synchronizedCounter(failedRequestMetricGroup.counter(COUNTER));
+        this.slowRequestThreshold = flinkOperatorConfiguration.getSlowRequestThreshold();
+        this.slowRequestCounter =
+                OperatorMetricUtils.synchronizedCounter(slowRequestMetricGroup.counter(COUNTER));
         this.responseCounter =
                 OperatorMetricUtils.synchronizedCounter(responseMetricGroup.counter(COUNTER));
 
@@ -91,37 +124,137 @@ public class KubernetesClientMetrics implements Interceptor {
                 responseMetricGroup.histogram(
                         HISTO, OperatorMetricUtils.createHistogram(flinkOperatorConfiguration));
 
-        Executors.newSingleThreadScheduledExecutor()
-                .scheduleAtFixedRate(this::updateMeters, 0, 1, TimeUnit.SECONDS);
-    }
-
-    @Override
-    public Response intercept(Chain chain) throws IOException {
-        Request request = chain.request();
-        updateRequestMetrics(request);
-        Response response = null;
-        final long startTime = System.nanoTime();
-        try {
-            response = chain.proceed(request);
-            return response;
-        } finally {
-            updateResponseMetrics(response, startTime);
+        this.httpResponseCodeGroupsEnabled =
+                flinkOperatorConfiguration.isKubernetesClientMetricsHttpResponseCodeGroupsEnabled();
+        if (this.httpResponseCodeGroupsEnabled) {
+            this.responseCodeGroupMeters.add(
+                    createMeterViewForMetricsGroup(
+                            responseMetricGroup.addGroup(HTTP_RESPONSE_1XX)));
+            this.responseCodeGroupMeters.add(
+                    createMeterViewForMetricsGroup(
+                            responseMetricGroup.addGroup(HTTP_RESPONSE_2XX)));
+            this.responseCodeGroupMeters.add(
+                    createMeterViewForMetricsGroup(
+                            responseMetricGroup.addGroup(HTTP_RESPONSE_3XX)));
+            this.responseCodeGroupMeters.add(
+                    createMeterViewForMetricsGroup(
+                            responseMetricGroup.addGroup(HTTP_RESPONSE_4XX)));
+            this.responseCodeGroupMeters.add(
+                    createMeterViewForMetricsGroup(
+                            responseMetricGroup.addGroup(HTTP_RESPONSE_5XX)));
         }
     }
 
-    private void updateRequestMetrics(Request request) {
+    @Override
+    public void before(BasicBuilder builder, HttpRequest request, RequestTags tags) {
+        long requestStartTime = nanoTimeSource.getAsLong();
+        // Attach a header to the request. We don't care if is actually sent or echoed back in the
+        // response.
+        // As the request is included in the after callbacks so we just read the value from the
+        // headers on that.
+        builder.setHeader(REQUEST_START_TIME_HEADER, String.valueOf(requestStartTime));
+        updateRequestMetrics(request);
+    }
+
+    @Override
+    public void after(
+            HttpRequest request,
+            HttpResponse<?> response,
+            AsyncBody.Consumer<List<ByteBuffer>> consumer) {
+        trackRequestLatency(request);
+        updateResponseMetrics(response);
+    }
+
+    @Override
+    public CompletableFuture<Boolean> afterFailure(
+            BasicBuilder builder, HttpResponse<?> response, RequestTags tags) {
+        this.requestFailedRateMeter.markEvent();
+        return CompletableFuture.completedFuture(false);
+    }
+
+    @Override
+    public void afterConnectionFailure(HttpRequest request, Throwable failure) {
+        trackRequestLatency(request);
+        this.requestFailedRateMeter.markEvent();
+    }
+
+    @VisibleForTesting
+    Counter getRequestCounter() {
+        return requestCounter;
+    }
+
+    @VisibleForTesting
+    Counter getResponseCounter() {
+        return responseCounter;
+    }
+
+    @VisibleForTesting
+    Counter getRequestMethodCounter(String method) {
+        return requestMethodCounter.get(method);
+    }
+
+    @VisibleForTesting
+    SynchronizedMeterView getRequestRateMeter() {
+        return requestRateMeter;
+    }
+
+    @VisibleForTesting
+    SynchronizedMeterView getResponseCodeMeter(int statusCode) {
+        return responseCodeMeters.get(statusCode);
+    }
+
+    @VisibleForTesting
+    List<SynchronizedMeterView> getResponseCodeGroupMeters() {
+        return responseCodeGroupMeters;
+    }
+
+    @VisibleForTesting
+    Histogram getResponseLatency() {
+        return responseLatency;
+    }
+
+    @VisibleForTesting
+    public Counter getSlowRequestCounter() {
+        return slowRequestCounter;
+    }
+
+    @VisibleForTesting
+    public Duration getSlowRequestThreshold() {
+        return slowRequestThreshold;
+    }
+
+    @VisibleForTesting
+    SynchronizedMeterView getRequestFailedRateMeter() {
+        return requestFailedRateMeter;
+    }
+
+    private void updateRequestMetrics(HttpRequest request) {
         this.requestRateMeter.markEvent();
         getCounterByRequestMethod(request.method()).inc();
     }
 
-    private void updateResponseMetrics(Response response, long startTimeNanos) {
-        final long latency = System.nanoTime() - startTimeNanos;
+    private void updateResponseMetrics(HttpResponse<?> response) {
         if (response != null) {
             this.responseRateMeter.markEvent();
-            this.responseLatency.update(latency);
-            getCounterByResponseCode(response.code()).inc();
+            getMeterViewByResponseCode(response.code()).markEvent();
+            if (this.httpResponseCodeGroupsEnabled) {
+                responseCodeGroupMeters.get(response.code() / 100 - 1).markEvent();
+            }
         } else {
             this.requestFailedRateMeter.markEvent();
+        }
+    }
+
+    private void trackRequestLatency(HttpRequest request) {
+        final String header = request.header(REQUEST_START_TIME_HEADER);
+        if (header != null) {
+            final long currentNanos = nanoTimeSource.getAsLong();
+            final long requestStartNanos = Long.parseLong(header);
+            final long latency = currentNanos - requestStartNanos;
+            this.responseLatency.update(latency);
+            if (latency >= slowRequestThreshold.toNanos()) {
+                slowRequestCounter.inc();
+            }
         }
     }
 
@@ -133,17 +266,17 @@ public class KubernetesClientMetrics implements Interceptor {
                                 requestMetricGroup.addGroup(key).counter(COUNTER)));
     }
 
-    private Counter getCounterByResponseCode(int code) {
-        return responseCodeCounters.computeIfAbsent(
-                code,
-                key ->
-                        OperatorMetricUtils.synchronizedCounter(
-                                responseMetricGroup.addGroup(key).counter(COUNTER)));
+    private SynchronizedMeterView getMeterViewByResponseCode(int code) {
+        return responseCodeMeters.computeIfAbsent(
+                code, key -> createMeterViewForMetricsGroup(responseMetricGroup.addGroup(key)));
     }
 
-    private void updateMeters() {
-        this.requestRateMeter.update();
-        this.requestFailedRateMeter.update();
-        this.responseRateMeter.update();
+    private SynchronizedMeterView createMeterViewForMetricsGroup(MetricGroup metricGroup) {
+        return OperatorMetricUtils.synchronizedMeterView(
+                metricGroup.meter(
+                        METER,
+                        new MeterView(
+                                OperatorMetricUtils.synchronizedCounter(
+                                        metricGroup.counter(COUNTER)))));
     }
 }

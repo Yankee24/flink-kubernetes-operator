@@ -26,13 +26,20 @@ under the License.
 
 # Helm installation
 
-The operator installation is managed by a helm chart. To install run:
+The operator installation is managed by a helm chart. To install with the chart bundled in the source code run:
 
 ```
 helm install flink-kubernetes-operator helm/flink-kubernetes-operator
 ```
 
-Alternatively to install the operator (and also the helm chart) to a specific namespace:
+To install from our Helm Chart Reporsitory run:
+
+```
+helm repo add flink-operator-repo https://downloads.apache.org/flink/flink-kubernetes-operator-<OPERATOR-VERSION>/
+helm install flink-kubernetes-operator flink-operator-repo/flink-kubernetes-operator
+```
+
+Alternatively to install the operator (and also the helm chart) to a specific namespace add the arguments `--namespace` and `--create-namespace` ex:
 
 ```
 helm install flink-kubernetes-operator helm/flink-kubernetes-operator --namespace flink --create-namespace
@@ -49,6 +56,10 @@ To override single parameters you can use `--set`, for example:
 ```
 helm install --set image.repository=apache/flink-kubernetes-operator --set image.tag={{< stable >}}{{< version >}}{{< /stable >}}{{< unstable >}}latest{{< /unstable >}} flink-kubernetes-operator helm/flink-kubernetes-operator
 ```
+Note, you should escape special characters in your `--set` lines, for example:
+```
+helm install --set defaultConfiguration."log4j-operator\.properties"=rootLogger.level\=DEBUG flink-kubernetes-operator helm/flink-kubernetes-operator
+```
 
 You can also provide your custom values file by using the `-f` flag:
 ```
@@ -57,52 +68,70 @@ helm install -f myvalues.yaml flink-kubernetes-operator helm/flink-kubernetes-op
 
 The configurable parameters of the Helm chart and which default values as detailed in the following table:
 
-| Parameters | Description | Default Value |
-| ---------- | ----------- | ------------- |
-| watchNamespaces | List of kubernetes namespaces to watch for FlinkDeployment changes, empty means all namespaces. | |
-| image.repository | The image repository of flink-kubernetes-operator. | ghcr.io/apache/flink-kubernetes-operator |
-| image.pullPolicy | The image pull policy of flink-kubernetes-operator. | IfNotPresent |
-| image.tag | The image tag of flink-kubernetes-operator. | latest |
-| rbac.create | Whether to enable RBAC to create for said namespaces. | true |
-| rbac.nodesRule.create | Whether to add RBAC rule to list nodes which is needed for rest-service exposed as NodePort type. | false |
-| operatorPod.annotations | Custom annotations to be added to the operator pod (but not the deployment). | |
-| operatorPod.labels | Custom labels to be added to the operator pod (but not the deployment). | |
-| operatorPod.env | Custom env to be added to the operator pod. | |
-| operatorPod.dnsPolicy | DNS policy to be used by the operator pod. | |
-| operatorPod.dnsConfig | DNS configuration to be used by the operator pod. | |
-| operatorServiceAccount.create | Whether to enable operator service account to create for flink-kubernetes-operator. | true |
-| operatorServiceAccount.annotations | The annotations of operator service account. | |
-| operatorServiceAccount.name | The name of operator service account. | flink-operator |
-| jobServiceAccount.create | Whether to enable job service account to create for flink jobmanager/taskmanager pods. | true |
-| jobServiceAccount.annotations | The annotations of job service account. | "helm.sh/resource-policy": keep |
-| jobServiceAccount.name | The name of job service account. | flink |
-| operatorVolumeMounts.create | Whether to enable operator volume mounts to create for flink-kubernetes-operator. | false |
-| operatorVolumeMounts.data | List of mount paths of operator volume mounts.  | - name: flink-artifacts<br/>&nbsp;&nbsp;mountPath: /opt/flink/artifacts |
-| operatorVolumes.create | Whether to enable operator volumes to create for flink-kubernetes-operator. | false |
-| operatorVolumes.data | The ConfigMap of operator volumes. | - name: flink-artifacts<br/>&nbsp;&nbsp;hostPath:<br/>&nbsp;&nbsp;&nbsp;&nbsp;path: /tmp/flink/artifacts<br/>&nbsp;&nbsp;&nbsp;&nbsp;type: DirectoryOrCreate |
-| podSecurityContext | Defines privilege and access control settings for a pod or container for pod security context.  | runAsUser: 9999<br/>runAsGroup: 9999 |
-| operatorSecurityContext | Defines privilege and access control settings for a pod or container for operator security context.  | |
-| webhookSecurityContext | Defines privilege and access control settings for a pod or container for webhook security context. | |
-| webhook.create | Whether to enable validating and mutating webhooks for flink-kubernetes-operator.                        | true |
-| webhook.mutator.create | Enable or disable mutating webhook, overrides `webhook.create` | |
-| webhook.validator.create | Enable or disable validating webhook, overrides `webhook.create` | |
-| webhook.keystore | The ConfigMap of webhook key store. | useDefaultPassword: true |
-| defaultConfiguration.create | Whether to enable default configuration to create for flink-kubernetes-operator. | true |
-| defaultConfiguration.append | Whether to append configuration files with configs.  | true |
-| defaultConfiguration.flink-conf.yaml | The default configuration of flink-conf.yaml. | kubernetes.operator.metrics.reporter.slf4j.factory.class: org.apache.flink.metrics.slf4j.Slf4jReporterFactory<br/>kubernetes.operator.metrics.reporter.slf4j.interval: 5 MINUTE<br/>kubernetes.operator.reconcile.interval: 15 s<br/>kubernetes.operator.observer.progress-check.interval: 5 s |
-| defaultConfiguration.log4j-operator.properties | The default configuration of log4j-operator.properties. | |
-| defaultConfiguration.log4j-console.properties | The default configuration of log4j-console.properties. | |
-| metrics.port | The metrics port on the container for default configuration. | |
-| imagePullSecrets | The image pull secrets of flink-kubernetes-operator. | |
-| nameOverride | Overrides the name with the specified name. | |
-| fullnameOverride | Overrides the fullname with the specified full name. | |
-| jvmArgs.webhook | The JVM start up options for webhook. | |
-| jvmArgs.operator |  The JVM start up options for operator. | |
-| operatorHealth.port |  Operator health endpoint port to be used by the probes. | 8085 |
-| operatorHealth.livenessProbe |  Liveness probe configuration for the operator using the health endpoint. Only time settings should be configured, endpoint is set automatically based on port. | |
-| operatorHealth.startupProbe |  Startup probe configuration for the operator using the health endpoint. Only time settings should be configured, endpoint is set automatically based on port. | |
+| Parameters                                     | Description                                                                                                                                                    | Default Value                                                                                                                                                                                                                                                                                  |
+|------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| watchNamespaces                                | List of kubernetes namespaces to watch for FlinkDeployment changes, empty means all namespaces.                                                                |                                                                                                                                                                                                                                                                                                |
+| image.repository                               | The image repository of flink-kubernetes-operator.                                                                                                             | ghcr.io/apache/flink-kubernetes-operator                                                                                                                                                                                                                                                       |
+| image.pullPolicy                               | The image pull policy of flink-kubernetes-operator.                                                                                                            | IfNotPresent                                                                                                                                                                                                                                                                                   |
+| image.tag                                      | The image tag of flink-kubernetes-operator.                                                                                                                    | latest                                                                                                                                                                                                                                                                                         |
+| image.digest                                   | The image tag of flink-kubernetes-operator. If set then it takes precedence and the image tag will be ignored.                                                 |                                                                                                                                                                                                                                                                                                |
+| replicas                                       | Operator replica count. Must be 1 unless leader election is configured.                                                                                        | 1                                                                                                                                                                                                                                                                                              |
+| strategy.type                                  | Operator pod upgrade strategy. Must be Recreate unless leader election is configured.                                                                          | Recreate                                                                                                                                                                                                                                                                                       |
+| rbac.create                                    | Whether to enable RBAC to create for said namespaces.                                                                                                          | true                                                                                                                                                                                                                                                                                           |
+| rbac.nodesRule.create                          | Whether to add RBAC rule to list nodes which is needed for rest-service exposed as NodePort type.                                                              | false                                                                                                                                                                                                                                                                                          |
+| operatorPod.annotations                        | Custom annotations to be added to the operator pod (but not the deployment).                                                                                   |                                                                                                                                                                                                                                                                                                |
+| operatorPod.labels                             | Custom labels to be added to the operator pod and deployment.                                                                                                  |                                                                                                                                                                                                                                                                                                |
+| operatorPod.env                                | Custom env to be added to the operator pod.                                                                                                                    |                                                                                                                                                                                                                                                                                                |
+| operatorPod.envFrom                            | Custom envFrom settings to be added to the operator pod.                                                                                                       |                                                                                                                                                                                                                                                                                                |
+| operatorPod.dnsPolicy                          | DNS policy to be used by the operator pod.                                                                                                                     |                                                                                                                                                                                                                                                                                                |
+| operatorPod.dnsConfig                          | DNS configuration to be used by the operator pod.                                                                                                              |                                                                                                                                                                                                                                                                                                |
+| operatorPod.nodeSelector                       | Custom nodeSelector to be added to the operator pod.                                                                                                           |                                                                                                                                                                                                                                                                                                |
+| operatorPod.topologySpreadConstraints          | Custom topologySpreadConstraints to be added to the operator pod.                                                                                              |                                                                                                                                                                                                                                                                                                |
+| operatorPod.resources                          | Custom resources block to be added to the operator pod on main container.                                                                                      |                                                                                                                                                                                                                                                                                                |
+| operatorPod.webhook.resources                  | Custom resources block to be added to the operator pod on flink-webhook container.                                                                             |                                                                                                                                                                                                                                                                                                |
+| operatorPod.webhook.container.env              | Custom env to be added to the flink-webhook container                                                                                                          |                            |
+| operatorPod.tolerations                        | Custom tolerations to be added to the operator pod.                                                                                                            |                                                                                                                                                                                                                                                                                                |
+| operatorServiceAccount.create                  | Whether to enable operator service account to create for flink-kubernetes-operator.                                                                            | true                                                                                                                                                                                                                                                                                           |
+| operatorServiceAccount.annotations             | The annotations of operator service account.                                                                                                                   |                                                                                                                                                                                                                                                                                                |
+| operatorServiceAccount.name                    | The name of operator service account.                                                                                                                          | flink-operator                                                                                                                                                                                                                                                                                 |
+| jobServiceAccount.create                       | Whether to enable job service account to create for flink jobmanager/taskmanager pods.                                                                         | true                                                                                                                                                                                                                                                                                           |
+| jobServiceAccount.annotations                  | The annotations of job service account.                                                                                                                        | "helm.sh/resource-policy": keep                                                                                                                                                                                                                                                                |
+| jobServiceAccount.name                         | The name of job service account.                                                                                                                               | flink                                                                                                                                                                                                                                                                                          |
+| operatorVolumeMounts.create                    | Whether to enable operator volume mounts to create for flink-kubernetes-operator.                                                                              | false                                                                                                                                                                                                                                                                                          |
+| operatorVolumeMounts.data                      | List of mount paths of operator volume mounts.                                                                                                                 | - name: flink-artifacts<br/>&nbsp;&nbsp;mountPath: /opt/flink/artifacts                                                                                                                                                                                                                        |
+| operatorVolumes.create                         | Whether to enable operator volumes to create for flink-kubernetes-operator.                                                                                    | false                                                                                                                                                                                                                                                                                          |
+| operatorVolumes.data                           | The ConfigMap of operator volumes.                                                                                                                             | - name: flink-artifacts<br/>&nbsp;&nbsp;hostPath:<br/>&nbsp;&nbsp;&nbsp;&nbsp;path: /tmp/flink/artifacts<br/>&nbsp;&nbsp;&nbsp;&nbsp;type: DirectoryOrCreate                                                                                                                                   |
+| podSecurityContext                             | Defines privilege and access control settings for a pod or container for pod security context.                                                                 | runAsUser: 9999<br/>runAsGroup: 9999                                                                                                                                                                                                                                                           |
+| operatorSecurityContext                        | Defines privilege and access control settings for a pod or container for operator security context.                                                            |                                                                                                                                                                                                                                                                                                |
+| webhookSecurityContext                         | Defines privilege and access control settings for a pod or container for webhook security context.                                                             |                                                                                                                                                                                                                                                                                                |
+| webhook.create                                 | Whether to enable validating and mutating webhooks for flink-kubernetes-operator.                                                                              | true                                                                                                                                                                                                                                                                                           |
+| webhook.mutator.create                         | Enable or disable mutating webhook, overrides `webhook.create`                                                                                                 |                                                                                                                                                                                                                                                                                                |
+| webhook.validator.create                       | Enable or disable validating webhook, overrides `webhook.create`                                                                                               |                                                                                                                                                                                                                                                                                                |
+| webhook.keystore                               | The ConfigMap of webhook key store.                                                                                                                            | useDefaultPassword: true                                                                                                                                                                                                                                                                       |
+| webhook.serviceLabels                          | The labels for flink-operator-webhook-service-resource.                                                                                                        |                                                                                                                                                                                                                                                                        |
+| defaultConfiguration.create                    | Whether to enable default configuration to create for flink-kubernetes-operator.                                                                               | true                                                                                                                                                                                                                                                                                           |
+| defaultConfiguration.append                    | Whether to append configuration files with configs.                                                                                                            | true                                                                                                                                                                                                                                                                                           |
+| defaultConfiguration.flink-conf.yaml           | The default configuration of flink-conf.yaml.                                                                                                                  | kubernetes.operator.metrics.reporter.slf4j.factory.class: org.apache.flink.metrics.slf4j.Slf4jReporterFactory<br/>kubernetes.operator.metrics.reporter.slf4j.interval: 5 MINUTE<br/>kubernetes.operator.reconcile.interval: 15 s<br/>kubernetes.operator.observer.progress-check.interval: 5 s |
+| defaultConfiguration.log4j-operator.properties | The default configuration of log4j-operator.properties.                                                                                                        |                                                                                                                                                                                                                                                                                                |
+| defaultConfiguration.log4j-console.properties  | The default configuration of log4j-console.properties.                                                                                                         |                                                                                                                                                                                                                                                                                                |
+| metrics.port                                   | The metrics port on the container for default configuration.                                                                                                   |                                                                                                                                                                                                                                                                                                |
+| imagePullSecrets                               | The image pull secrets of flink-kubernetes-operator.                                                                                                           |                                                                                                                                                                                                                                                                                                |
+| nameOverride                                   | Overrides the name with the specified name.                                                                                                                    |                                                                                                                                                                                                                                                                                                |
+| fullnameOverride                               | Overrides the fullname with the specified full name.                                                                                                           |                                                                                                                                                                                                                                                                                                |
+| jvmArgs.webhook                                | The JVM start up options for webhook.                                                                                                                          |                                                                                                                                                                                                                                                                                                |
+| jvmArgs.operator                               | The JVM start up options for operator.                                                                                                                         |                                                                                                                                                                                                                                                                                                |
+| operatorHealth.port                            | Operator health endpoint port to be used by the probes.                                                                                                        | 8085                                                                                                                                                                                                                                                                                           |
+| operatorHealth.livenessProbe                   | Liveness probe configuration for the operator using the health endpoint. Only time settings should be configured, endpoint is set automatically based on port. |                                                                                                                                                                                                                                                                                                |
+| operatorHealth.startupProbe                    | Startup probe configuration for the operator using the health endpoint. Only time settings should be configured, endpoint is set automatically based on port.  |                                                                                                                                                                                                                                                                                                |
+| postStart                                      | The postStart hook configuration for the main container.                                                                                                       |                                                                                                                                                                                                                                                                                                |
+| tls.create                                     | Whether to mount an optional secret containing a tls truststore for the flink-kubernetes-operator.                                                             | false                                                                                                                                                                                                                                                                                          |
+| tls.secretName                                 | The name of the tls secret                                                                                                                                     | flink-operator-cert                                                                                                                                                                                                                                                                            |
+| tls.secretKeyRef.name                 | The name of the secret containing the password for the java keystore/truststore                                                                                | operator-certificate-password                                                                                                                                                                                                                                                                  |
+| tls.secretKeyRef.key                  | The key that holds this password                                                                                                                               | password                                                                                                                                                                                                                                                                                       |
 
 For more information check the [Helm documentation](https://helm.sh/docs/helm/helm_install/).
+
+__Notice__: The pod resources should be set as your workload in different environments to archive a matched K8s pod QoS. See also [Pod Quality of Service Classes](https://kubernetes.io/docs/concepts/workloads/pods/pod-qos/#quality-of-service-classes).
 
 ## Operator webhooks
 
@@ -142,45 +171,26 @@ Check out this [document](https://kubernetes.io/docs/reference/access-authn-auth
 
 ## Working with Argo CD
 
-If you are using [Argo CD](https://argoproj.github.io) to manage the operator, you will encounter the issue which complains the CRDs too long. Same with [this issue](https://github.com/prometheus-operator/prometheus-operator/issues/4439).
-The recommended solution is to split the operator into two Argo apps, such as:
-
-* The first app just for installing the CRDs with `Replace=true` directly, snippet:
+If you are using [Argo CD](https://argoproj.github.io) to manage the operator,
+the simplest example could look like this.
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: flink-kubernetes-operator-crds
-spec:
-  source:
-    repoURL: https://github.com/apache/flink-kubernetes-operator
-    targetRevision: main
-    path: helm/flink-kubernetes-operator/crds
-    syncOptions:
-    - Replace=true
-...
-```
-
-* The second app that installs the Helm chart with `skipCrds=true` (new feature in Argo CD 2.3.0), snippet:
-
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: flink-kubernetes-operator-skip-crds
+  name: flink-kubernetes-operator
 spec:
   source:
     repoURL: https://github.com/apache/flink-kubernetes-operator
     targetRevision: main
     path: helm/flink-kubernetes-operator
-    helm:
-      skipCrds: true
 ...
 ```
 
+Check out [Argo CD documents](https://argo-cd.readthedocs.io/en/stable/user-guide/helm/) for more details.
+
 ## Advanced customization techniques
-The Helm chart does not aim to provide configuration options for all the possible deployment scenarios of the Operator. There are use cases for injecting common tools and/or sidecars in most enterprise environments that simply cannot be covered by public Helm charts.
+The Helm chart does not aim to provide configuration options for all the possible deployment scenarios of the Operator. There are use cases for injecting common tools and/or sidecars in most enterprise environments that cannot be covered by public Helm charts.
 
 Fortunately, [post rendering](https://helm.sh/docs/topics/advanced/#post-rendering) in Helm gives you the ability to manually manipulate manifests before they are installed on a Kubernetes cluster. This allows users to use tools like [kustomize](https://kustomize.io) to apply configuration changes without the need to fork public charts.
 

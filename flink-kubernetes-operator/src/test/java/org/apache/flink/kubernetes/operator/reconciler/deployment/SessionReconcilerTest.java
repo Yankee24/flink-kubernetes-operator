@@ -18,19 +18,27 @@
 package org.apache.flink.kubernetes.operator.reconciler.deployment;
 
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
+import org.apache.flink.kubernetes.operator.OperatorTestBase;
 import org.apache.flink.kubernetes.operator.TestUtils;
 import org.apache.flink.kubernetes.operator.TestingFlinkService;
-import org.apache.flink.kubernetes.operator.TestingStatusRecorder;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
-import org.apache.flink.kubernetes.operator.utils.EventRecorder;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
+import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
+import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
+import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
+import org.apache.flink.kubernetes.operator.reconciler.TestReconcilerAdapter;
 
+import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
-import org.junit.jupiter.api.BeforeEach;
+import lombok.Getter;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -42,21 +50,23 @@ import static org.junit.jupiter.api.Assertions.fail;
  * Tests for {@link org.apache.flink.kubernetes.operator.reconciler.deployment.SessionReconciler}.
  */
 @EnableKubernetesMockClient(crud = true)
-public class SessionReconcilerTest {
+public class SessionReconcilerTest extends OperatorTestBase {
 
-    private final FlinkConfigManager configManager = new FlinkConfigManager(new Configuration());
-    private KubernetesClient kubernetesClient;
-    private EventRecorder eventRecorder;
+    @Getter private KubernetesClient kubernetesClient;
+    private TestReconcilerAdapter<FlinkDeployment, FlinkDeploymentSpec, FlinkDeploymentStatus>
+            reconciler;
 
-    @BeforeEach
-    public void before() {
-        eventRecorder = new EventRecorder(kubernetesClient, (r, e) -> {});
+    @Override
+    public void setup() {
+        reconciler =
+                new TestReconcilerAdapter<>(
+                        this, new SessionReconciler(eventRecorder, statusRecorder));
     }
 
     @Test
     public void testStartSession() throws Exception {
         var count = new AtomicInteger(0);
-        TestingFlinkService flinkService =
+        flinkService =
                 new TestingFlinkService() {
                     @Override
                     public void submitSessionCluster(Configuration conf) throws Exception {
@@ -65,32 +75,14 @@ public class SessionReconcilerTest {
                     }
                 };
 
-        SessionReconciler reconciler =
-                new SessionReconciler(
-                        kubernetesClient,
-                        flinkService,
-                        configManager,
-                        eventRecorder,
-                        new TestingStatusRecorder<>());
         FlinkDeployment deployment = TestUtils.buildSessionCluster();
-        kubernetesClient.resource(deployment).createOrReplace();
         reconciler.reconcile(deployment, flinkService.getContext());
         assertEquals(1, count.get());
     }
 
     @Test
     public void testFailedUpgrade() throws Exception {
-        var flinkService = new TestingFlinkService();
-        var reconciler =
-                new SessionReconciler(
-                        kubernetesClient,
-                        flinkService,
-                        configManager,
-                        eventRecorder,
-                        new TestingStatusRecorder<>());
-
         FlinkDeployment deployment = TestUtils.buildSessionCluster();
-        kubernetesClient.resource(deployment).createOrReplace();
         reconciler.reconcile(deployment, flinkService.getContext());
 
         assertEquals(
@@ -125,5 +117,26 @@ public class SessionReconcilerTest {
                         .deserializeLastReconciledSpec()
                         .getRestartNonce());
         assertEquals(Set.of(deployment.getMetadata().getName()), flinkService.getSessions());
+    }
+
+    @Test
+    public void testSetOwnerReference() throws Exception {
+        FlinkDeployment flinkApp = TestUtils.buildApplicationCluster();
+        ObjectMeta deployMeta = flinkApp.getMetadata();
+        FlinkDeploymentStatus status = flinkApp.getStatus();
+        FlinkDeploymentSpec spec = flinkApp.getSpec();
+        Configuration deployConfig = configManager.getDeployConfig(deployMeta, spec);
+
+        status.getJobStatus().setState(org.apache.flink.api.common.JobStatus.FINISHED);
+        status.setJobManagerDeploymentStatus(JobManagerDeploymentStatus.READY);
+        reconciler
+                .getReconciler()
+                .deploy(getResourceContext(flinkApp), spec, deployConfig, Optional.empty(), false);
+
+        final List<Map<String, String>> expectedOwnerReferences =
+                List.of(TestUtils.generateTestOwnerReferenceMap(flinkApp));
+        List<Map<String, String>> or =
+                deployConfig.get(KubernetesConfigOptions.JOB_MANAGER_OWNER_REFERENCE);
+        Assertions.assertEquals(expectedOwnerReferences, or);
     }
 }

@@ -18,15 +18,18 @@
 package org.apache.flink.kubernetes.operator.service;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.FlinkSessionJob;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkSessionJobSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.JobSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.UpgradeMode;
-import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
-import org.apache.flink.kubernetes.operator.crd.status.Savepoint;
-import org.apache.flink.kubernetes.operator.crd.status.SavepointTriggerType;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkSessionJobSpec;
+import org.apache.flink.kubernetes.operator.api.spec.JobSpec;
+import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
+import org.apache.flink.kubernetes.operator.api.status.Savepoint;
+import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
+import org.apache.flink.kubernetes.operator.observer.CheckpointFetchResult;
+import org.apache.flink.kubernetes.operator.observer.CheckpointStatsResult;
 import org.apache.flink.kubernetes.operator.observer.SavepointFetchResult;
 import org.apache.flink.runtime.client.JobStatusMessage;
 import org.apache.flink.runtime.jobmaster.JobResult;
@@ -34,10 +37,12 @@ import org.apache.flink.runtime.jobmaster.JobResult;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.PodList;
 import io.fabric8.kubernetes.client.KubernetesClient;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
 
 import javax.annotation.Nullable;
 
-import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -51,50 +56,93 @@ public interface FlinkService {
 
     boolean isHaMetadataAvailable(Configuration conf);
 
+    boolean atLeastOneCheckpoint(Configuration conf);
+
     void submitSessionCluster(Configuration conf) throws Exception;
 
     JobID submitJobToSessionCluster(
             ObjectMeta meta,
             FlinkSessionJobSpec spec,
+            JobID jobID,
             Configuration conf,
             @Nullable String savepoint)
             throws Exception;
 
     boolean isJobManagerPortReady(Configuration config);
 
-    Collection<JobStatusMessage> listJobs(Configuration conf) throws Exception;
+    Optional<JobStatusMessage> getJobStatus(Configuration conf, JobID jobId) throws Exception;
 
     JobResult requestJobResult(Configuration conf, JobID jobID) throws Exception;
 
-    void cancelJob(FlinkDeployment deployment, UpgradeMode upgradeMode, Configuration conf)
+    CancelResult cancelJob(FlinkDeployment deployment, SuspendMode suspendMode, Configuration conf)
             throws Exception;
 
     void deleteClusterDeployment(
-            ObjectMeta meta, FlinkDeploymentStatus status, boolean deleteHaData);
+            ObjectMeta meta,
+            FlinkDeploymentStatus status,
+            Configuration conf,
+            boolean deleteHaData);
 
-    void cancelSessionJob(FlinkSessionJob sessionJob, UpgradeMode upgradeMode, Configuration conf)
+    CancelResult cancelSessionJob(
+            FlinkSessionJob sessionJob, SuspendMode suspendMode, Configuration conf)
             throws Exception;
 
-    void triggerSavepoint(
+    String triggerSavepoint(
             String jobId,
-            SavepointTriggerType triggerType,
-            org.apache.flink.kubernetes.operator.crd.status.SavepointInfo savepointInfo,
+            org.apache.flink.core.execution.SavepointFormatType savepointFormatType,
+            String savepointDirectory,
             Configuration conf)
             throws Exception;
 
-    Optional<Savepoint> getLastCheckpoint(JobID jobId, Configuration conf) throws Exception;
+    String triggerCheckpoint(
+            String jobId,
+            org.apache.flink.core.execution.CheckpointType checkpointType,
+            Configuration conf)
+            throws Exception;
+
+    Optional<Savepoint> getLastCheckpoint(JobID jobId, Configuration conf);
 
     SavepointFetchResult fetchSavepointInfo(String triggerId, String jobId, Configuration conf);
 
+    CheckpointFetchResult fetchCheckpointInfo(String triggerId, String jobId, Configuration conf);
+
+    CheckpointStatsResult fetchCheckpointStats(String jobId, Long checkpointId, Configuration conf);
+
+    Tuple2<
+                    Optional<CheckpointHistoryWrapper.CompletedCheckpointInfo>,
+                    Optional<CheckpointHistoryWrapper.PendingCheckpointInfo>>
+            getCheckpointInfo(JobID jobId, Configuration conf) throws Exception;
+
     void disposeSavepoint(String savepointPath, Configuration conf) throws Exception;
 
-    Map<String, String> getClusterInfo(Configuration conf) throws Exception;
+    Map<String, String> getClusterInfo(Configuration conf, @Nullable String jobId) throws Exception;
 
     PodList getJmPodList(FlinkDeployment deployment, Configuration conf);
 
-    void waitForClusterShutdown(Configuration conf);
+    boolean scale(FlinkResourceContext<?> resourceContext, Configuration deployConfig)
+            throws Exception;
 
-    default boolean scale(ObjectMeta meta, JobSpec jobSpec, Configuration conf) {
-        return false;
+    Map<String, String> getMetrics(Configuration conf, String jobId, List<String> metricNames)
+            throws Exception;
+
+    RestClusterClient<String> getClusterClient(Configuration conf) throws Exception;
+
+    /** Result of a cancel operation. */
+    @AllArgsConstructor
+    class CancelResult {
+        @Getter boolean pending;
+        String savepointPath;
+
+        public static CancelResult completed(String path) {
+            return new CancelResult(false, path);
+        }
+
+        public static CancelResult pending() {
+            return new CancelResult(true, null);
+        }
+
+        public Optional<String> getSavepointPath() {
+            return Optional.ofNullable(savepointPath);
+        }
     }
 }

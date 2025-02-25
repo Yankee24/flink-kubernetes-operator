@@ -17,54 +17,48 @@
 
 package org.apache.flink.kubernetes.operator;
 
-import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.HighAvailabilityOptions;
-import org.apache.flink.configuration.TaskManagerOptions;
-import org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory;
+import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
+import org.apache.flink.kubernetes.operator.api.FlinkStateSnapshot;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
+import org.apache.flink.kubernetes.operator.api.spec.JobReference;
+import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
+import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
+import org.apache.flink.kubernetes.operator.api.utils.BaseTestUtils;
 import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.FlinkSessionJob;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkDeploymentSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkSessionJobSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkVersion;
-import org.apache.flink.kubernetes.operator.crd.spec.JobManagerSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.JobSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.JobState;
-import org.apache.flink.kubernetes.operator.crd.spec.Resource;
-import org.apache.flink.kubernetes.operator.crd.spec.TaskManagerSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.UpgradeMode;
-import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
-import org.apache.flink.kubernetes.operator.crd.status.FlinkSessionJobStatus;
-import org.apache.flink.kubernetes.operator.crd.status.JobManagerDeploymentStatus;
-import org.apache.flink.kubernetes.operator.exception.DeploymentFailedException;
+import org.apache.flink.kubernetes.operator.health.CanaryResourceManager;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricGroup;
+import org.apache.flink.kubernetes.operator.reconciler.SnapshotType;
 import org.apache.flink.runtime.metrics.MetricRegistry;
 import org.apache.flink.runtime.metrics.util.TestingMetricRegistry;
 
-import io.fabric8.kubernetes.api.model.Container;
 import io.fabric8.kubernetes.api.model.ContainerStatus;
 import io.fabric8.kubernetes.api.model.ContainerStatusBuilder;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
-import io.fabric8.kubernetes.api.model.ObjectMetaBuilder;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.PodList;
 import io.fabric8.kubernetes.api.model.PodListBuilder;
-import io.fabric8.kubernetes.api.model.PodSpec;
 import io.fabric8.kubernetes.api.model.PodStatusBuilder;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.DeploymentCondition;
 import io.fabric8.kubernetes.api.model.apps.DeploymentSpec;
 import io.fabric8.kubernetes.api.model.apps.DeploymentStatus;
+import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.mockwebserver.utils.ResponseProvider;
 import io.javaoperatorsdk.operator.api.config.ControllerConfiguration;
 import io.javaoperatorsdk.operator.api.reconciler.Context;
+import io.javaoperatorsdk.operator.api.reconciler.IndexedResourceCache;
+import io.javaoperatorsdk.operator.api.reconciler.ResourceDiscriminator;
 import io.javaoperatorsdk.operator.api.reconciler.RetryInfo;
 import io.javaoperatorsdk.operator.api.reconciler.dependent.managed.ManagedDependentResourceContext;
+import io.javaoperatorsdk.operator.processing.event.EventSourceRetriever;
 import okhttp3.Headers;
 import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.params.provider.Arguments;
 
 import javax.annotation.Nullable;
 
@@ -76,159 +70,42 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 /** Testing utilities. */
-public class TestUtils {
-
-    public static final String TEST_NAMESPACE = "flink-operator-test";
-    public static final String TEST_DEPLOYMENT_NAME = "test-cluster";
-    public static final String TEST_SESSION_JOB_NAME = "test-session-job";
-    public static final String SERVICE_ACCOUNT = "flink-operator";
-    public static final String FLINK_VERSION = "latest";
-    public static final String IMAGE = String.format("flink:%s", FLINK_VERSION);
-    public static final String IMAGE_POLICY = "IfNotPresent";
-    public static final String SAMPLE_JAR = "local:///tmp/sample.jar";
+public class TestUtils extends BaseTestUtils {
+    public static final int MAX_RECONCILE_TIMES = 3;
 
     private static final String TEST_PLUGINS = "test-plugins";
     private static final String PlUGINS_JAR = TEST_PLUGINS + "-test-jar.jar";
 
-    public static FlinkDeployment buildSessionCluster() {
-        return buildSessionCluster(FlinkVersion.v1_15);
-    }
-
-    public static FlinkDeployment buildSessionCluster(FlinkVersion version) {
-        return buildSessionCluster(TEST_DEPLOYMENT_NAME, TEST_NAMESPACE, version);
-    }
-
-    public static FlinkDeployment buildSessionCluster(
-            String name, String namespace, FlinkVersion version) {
-        FlinkDeployment deployment = new FlinkDeployment();
-        deployment.setStatus(new FlinkDeploymentStatus());
-        deployment.setMetadata(
-                new ObjectMetaBuilder()
-                        .withName(name)
-                        .withNamespace(namespace)
-                        .withCreationTimestamp(Instant.now().toString())
-                        .build());
-        deployment.setSpec(getTestFlinkDeploymentSpec(version));
-        return deployment;
-    }
-
-    public static FlinkDeployment buildApplicationCluster() {
-        return buildApplicationCluster(FlinkVersion.v1_15);
-    }
-
-    public static FlinkDeployment buildApplicationCluster(String name, String namespace) {
-        return buildApplicationCluster(name, namespace, FlinkVersion.v1_15);
-    }
-
-    public static FlinkDeployment buildApplicationCluster(FlinkVersion version) {
-        return buildApplicationCluster(TEST_DEPLOYMENT_NAME, TEST_NAMESPACE, version);
-    }
-
-    public static FlinkDeployment buildApplicationCluster(
-            String name, String namespace, FlinkVersion version) {
-        FlinkDeployment deployment = buildSessionCluster(name, namespace, version);
-        deployment
-                .getSpec()
-                .setJob(
-                        JobSpec.builder()
-                                .jarURI(SAMPLE_JAR)
-                                .parallelism(1)
-                                .upgradeMode(UpgradeMode.STATELESS)
-                                .state(JobState.RUNNING)
-                                .build());
-        deployment.setStatus(deployment.initStatus());
-        return deployment;
-    }
-
-    public static FlinkSessionJob buildSessionJob(String name, String namespace) {
-        FlinkSessionJob sessionJob = new FlinkSessionJob();
-        sessionJob.setStatus(new FlinkSessionJobStatus());
-        sessionJob.setMetadata(
-                new ObjectMetaBuilder()
-                        .withName(name)
-                        .withNamespace(namespace)
-                        .withCreationTimestamp(Instant.now().toString())
-                        .withUid(UUID.randomUUID().toString())
-                        .withGeneration(1L)
-                        .build());
-
-        Map<String, String> conf = new HashMap<>();
-        conf.put(KubernetesOperatorConfigOptions.JAR_ARTIFACT_HTTP_HEADER.key(), "header");
-        sessionJob.setSpec(
-                FlinkSessionJobSpec.builder()
-                        .deploymentName(TEST_DEPLOYMENT_NAME)
-                        .job(
-                                JobSpec.builder()
-                                        .jarURI(SAMPLE_JAR)
-                                        .parallelism(1)
-                                        .upgradeMode(UpgradeMode.STATELESS)
-                                        .state(JobState.RUNNING)
-                                        .build())
-                        .flinkConfiguration(conf)
-                        .build());
-        return sessionJob;
-    }
-
-    public static FlinkSessionJob buildSessionJob() {
-        return buildSessionJob(TEST_SESSION_JOB_NAME, TEST_NAMESPACE);
-    }
-
-    public static FlinkDeploymentSpec getTestFlinkDeploymentSpec(FlinkVersion version) {
-        Map<String, String> conf = new HashMap<>();
-        conf.put(TaskManagerOptions.NUM_TASK_SLOTS.key(), "2");
-        conf.put(
-                HighAvailabilityOptions.HA_MODE.key(),
-                KubernetesHaServicesFactory.class.getCanonicalName());
-        conf.put(HighAvailabilityOptions.HA_STORAGE_PATH.key(), "test");
-        conf.put(CheckpointingOptions.SAVEPOINT_DIRECTORY.key(), "test-savepoint-dir");
-        conf.put(CheckpointingOptions.CHECKPOINTS_DIRECTORY.key(), "test-checkpoint-dir");
-
-        return FlinkDeploymentSpec.builder()
-                .image(IMAGE)
-                .imagePullPolicy(IMAGE_POLICY)
-                .serviceAccount(SERVICE_ACCOUNT)
-                .flinkVersion(version)
-                .flinkConfiguration(conf)
-                .jobManager(new JobManagerSpec(new Resource(1.0, "2048m"), 1, null))
-                .taskManager(new TaskManagerSpec(new Resource(1.0, "2048m"), null, null))
-                .build();
-    }
-
-    public static Pod getTestPod(String hostname, String apiVersion, List<Container> containers) {
-        final PodSpec podSpec = new PodSpec();
-        podSpec.setHostname(hostname);
-        podSpec.setContainers(containers);
-        final Pod pod = new Pod();
-        pod.setApiVersion(apiVersion);
-        pod.setSpec(podSpec);
-        return pod;
-    }
-
-    public static PodList createFailedPodList(String crashLoopMessage) {
+    public static PodList createFailedPodList(String crashLoopMessage, String reason) {
         ContainerStatus cs =
                 new ContainerStatusBuilder()
                         .withNewState()
                         .withNewWaiting()
-                        .withReason(DeploymentFailedException.REASON_CRASH_LOOP_BACKOFF)
+                        .withReason(reason)
                         .withMessage(crashLoopMessage)
                         .endWaiting()
                         .endState()
                         .build();
 
-        Pod pod = TestUtils.getTestPod("host", "apiVersion", Collections.emptyList());
+        Pod pod = getTestPod("host", "apiVersion", Collections.emptyList());
         pod.setStatus(
                 new PodStatusBuilder()
                         .withContainerStatuses(Collections.singletonList(cs))
@@ -237,56 +114,105 @@ public class TestUtils {
     }
 
     public static Deployment createDeployment(boolean ready) {
-        DeploymentStatus status = new DeploymentStatus();
+        String nowTs = Instant.now().toString();
+        var status = new DeploymentStatus();
         status.setAvailableReplicas(ready ? 1 : 0);
         status.setReplicas(1);
+        var availableCondition = new DeploymentCondition();
+        availableCondition.setType("Available");
+        availableCondition.setStatus(ready ? "True" : "False");
+        availableCondition.setLastTransitionTime(nowTs);
+        status.setConditions(List.of(availableCondition));
+
         DeploymentSpec spec = new DeploymentSpec();
         spec.setReplicas(1);
+
+        var meta = new ObjectMeta();
+        meta.setCreationTimestamp(nowTs);
+
         Deployment deployment = new Deployment();
-        deployment.setMetadata(new ObjectMeta());
+        deployment.setMetadata(meta);
         deployment.setSpec(spec);
         deployment.setStatus(status);
+
         return deployment;
     }
 
+    public static Map<String, String> generateTestOwnerReferenceMap(AbstractFlinkResource owner) {
+        return Map.of(
+                "apiVersion", owner.getApiVersion(),
+                "kind", owner.getKind(),
+                "name", owner.getMetadata().getName(),
+                "uid", owner.getMetadata().getUid(),
+                "blockOwnerDeletion", "true",
+                "controller", "false");
+    }
+
     public static <T extends HasMetadata> Context<T> createContextWithDeployment(
-            @Nullable Deployment deployment) {
+            @Nullable Deployment deployment, KubernetesClient client) {
         return new TestingContext<>() {
             @Override
             public Optional<T> getSecondaryResource(Class expectedType, String eventSourceName) {
                 return (Optional<T>) Optional.ofNullable(deployment);
             }
+
+            @Override
+            public KubernetesClient getClient() {
+                return client;
+            }
         };
     }
 
     public static <T extends HasMetadata> Context<T> createEmptyContext() {
-        return createContextWithDeployment(null);
+        return createContextWithDeployment(null, null);
     }
 
-    public static <T extends HasMetadata> Context<T> createContextWithReadyJobManagerDeployment() {
-        return createContextWithDeployment(createDeployment(true));
+    public static <T extends HasMetadata> Context<T> createEmptyContextWithClient(
+            KubernetesClient client) {
+        return createContextWithDeployment(null, client);
     }
 
-    public static <T extends HasMetadata> Context<T> createContextWithInProgressDeployment() {
-        return createContextWithDeployment(createDeployment(false));
+    public static <T extends HasMetadata> Context<T> createContextWithReadyJobManagerDeployment(
+            KubernetesClient client) {
+        return createContextWithDeployment(createDeployment(true), client);
+    }
+
+    public static <T extends HasMetadata> Context<T> createContextWithInProgressDeployment(
+            KubernetesClient client) {
+        return createContextWithDeployment(createDeployment(false), client);
     }
 
     public static <T extends HasMetadata> Context<T> createContextWithReadyFlinkDeployment() {
-        return createContextWithReadyFlinkDeployment(new HashMap<>());
+        return createContextWithReadyFlinkDeployment(new HashMap<>(), null);
     }
 
     public static <T extends HasMetadata> Context<T> createContextWithReadyFlinkDeployment(
-            Map<String, String> flinkDepConfig) {
+            KubernetesClient client) {
+        return createContextWithReadyFlinkDeployment(new HashMap<>(), client);
+    }
+
+    public static <T extends HasMetadata> Context<T> createContextWithReadyFlinkDeployment(
+            Map<String, String> flinkDepConfig, KubernetesClient client) {
+        return createContextWithReadyFlinkDeployment(flinkDepConfig, client, FlinkVersion.v1_18);
+    }
+
+    public static <T extends HasMetadata> Context<T> createContextWithReadyFlinkDeployment(
+            Map<String, String> flinkDepConfig, KubernetesClient client, FlinkVersion version) {
         return new TestingContext<>() {
             @Override
             public Optional<T> getSecondaryResource(Class expectedType, String eventSourceName) {
-                var session = buildSessionCluster();
+                var session = buildSessionCluster(version);
                 session.getStatus().setJobManagerDeploymentStatus(JobManagerDeploymentStatus.READY);
                 session.getSpec().getFlinkConfiguration().putAll(flinkDepConfig);
                 session.getStatus()
                         .getReconciliationStatus()
                         .serializeAndSetLastReconciledSpec(session.getSpec(), session);
                 return (Optional<T>) Optional.of(session);
+            }
+
+            @Override
+            public KubernetesClient getClient() {
+                return client;
             }
         };
     }
@@ -305,7 +231,8 @@ public class TestUtils {
 
     public static final String DEPLOYMENT_ERROR = "test deployment error message";
 
-    public static <T extends HasMetadata> Context<T> createContextWithFailedJobManagerDeployment() {
+    public static <T extends HasMetadata> Context<T> createContextWithFailedJobManagerDeployment(
+            KubernetesClient client) {
         return new TestingContext<>() {
             @Override
             public Optional getSecondaryResource(Class expectedType, String eventSourceName) {
@@ -329,7 +256,45 @@ public class TestUtils {
                 deployment.setStatus(status);
                 return Optional.of(deployment);
             }
+
+            @Override
+            public KubernetesClient getClient() {
+                return client;
+            }
         };
+    }
+
+    public static Context<FlinkStateSnapshot> createSnapshotContext(
+            KubernetesClient client, AbstractFlinkResource<?, ?> secondaryResource) {
+        return new TestingContext<>() {
+            @Override
+            public Optional<AbstractFlinkResource<?, ?>> getSecondaryResource(
+                    Class expectedType, String eventSourceName) {
+                return Optional.ofNullable(secondaryResource);
+            }
+
+            @Override
+            public KubernetesClient getClient() {
+                return client;
+            }
+        };
+    }
+
+    public static <CR extends AbstractFlinkResource<?, ?>>
+            List<FlinkStateSnapshot> getFlinkStateSnapshotsForResource(
+                    KubernetesClient kubernetesClient, CR resource) {
+        return kubernetesClient
+                .resources(FlinkStateSnapshot.class)
+                .inAnyNamespace()
+                .list()
+                .getItems()
+                .stream()
+                .filter(
+                        s ->
+                                s.getSpec()
+                                        .getJobReference()
+                                        .equals(JobReference.fromFlinkResource(resource)))
+                .collect(Collectors.toList());
     }
 
     public static String getTestPluginsRootDir(Path temporaryFolder) throws IOException {
@@ -389,6 +354,77 @@ public class TestUtils {
                 .setDelimiter(".".charAt(0))
                 .setRegisterConsumer((metric, name, group) -> {})
                 .build();
+    }
+
+    public static Stream<Arguments> flinkVersionsAndUpgradeModes() {
+        List<Arguments> args = new ArrayList<>();
+        for (FlinkVersion version : Set.of(FlinkVersion.v1_16, FlinkVersion.v1_20)) {
+            for (UpgradeMode upgradeMode : UpgradeMode.values()) {
+                args.add(arguments(version, upgradeMode));
+            }
+        }
+        return args.stream();
+    }
+
+    public static Stream<Arguments> flinkVersions() {
+        return Stream.of(arguments(FlinkVersion.v1_16), arguments(FlinkVersion.v1_20));
+    }
+
+    public static FlinkDeployment createCanaryDeployment() {
+        var cr = new FlinkDeployment();
+        cr.setSpec(cr.initSpec());
+        var meta = new ObjectMeta();
+        meta.setGeneration(0L);
+        meta.setLabels(Map.of(CanaryResourceManager.CANARY_LABEL, "true"));
+        meta.setName("canary");
+        meta.setNamespace("default");
+        cr.setMetadata(meta);
+        return cr;
+    }
+
+    public static FlinkSessionJob createCanaryJob() {
+        var cr = new FlinkSessionJob();
+        cr.setSpec(cr.initSpec());
+        var meta = new ObjectMeta();
+        meta.setGeneration(0L);
+        meta.setLabels(Map.of(CanaryResourceManager.CANARY_LABEL, "true"));
+        meta.setName("canary");
+        meta.setNamespace("default");
+        cr.setMetadata(meta);
+        return cr;
+    }
+
+    public static void reconcileSpec(FlinkDeployment deployment) {
+        deployment
+                .getStatus()
+                .getReconciliationStatus()
+                .serializeAndSetLastReconciledSpec(deployment.getSpec(), deployment);
+    }
+
+    /**
+     * Sets up an active cron trigger by ensuring that the latest successful snapshot happened
+     * earlier than the scheduled trigger.
+     */
+    public static Instant setupCronTrigger(SnapshotType snapshotType, FlinkDeployment deployment) {
+
+        Calendar calendar = Calendar.getInstance();
+        calendar.set(2022, Calendar.JUNE, 5, 11, 0);
+
+        String cronOptionKey;
+        switch (snapshotType) {
+            case SAVEPOINT:
+                cronOptionKey = KubernetesOperatorConfigOptions.PERIODIC_SAVEPOINT_INTERVAL.key();
+                break;
+            case CHECKPOINT:
+                cronOptionKey = KubernetesOperatorConfigOptions.PERIODIC_CHECKPOINT_INTERVAL.key();
+                break;
+            default:
+                throw new IllegalArgumentException("Unsupported snapshot type: " + snapshotType);
+        }
+
+        deployment.getSpec().getFlinkConfiguration().put(cronOptionKey, "0 0 12 5 6 ? 2022");
+        reconcileSpec(deployment);
+        return calendar.toInstant();
     }
 
     /** Testing ResponseProvider. */
@@ -451,12 +487,38 @@ public class TestUtils {
         }
 
         @Override
+        public <R> Optional<R> getSecondaryResource(
+                Class<R> aClass, ResourceDiscriminator<R, T> resourceDiscriminator) {
+            return Optional.empty();
+        }
+
+        @Override
         public ControllerConfiguration<T> getControllerConfiguration() {
             return null;
         }
 
         @Override
         public ManagedDependentResourceContext managedDependentResourceContext() {
+            return null;
+        }
+
+        @Override
+        public EventSourceRetriever<T> eventSourceRetriever() {
+            return null;
+        }
+
+        @Override
+        public KubernetesClient getClient() {
+            throw new UnsupportedOperationException("Not implemented");
+        }
+
+        @Override
+        public ExecutorService getWorkflowExecutorService() {
+            throw new UnsupportedOperationException("Not implemented");
+        }
+
+        @Override
+        public IndexedResourceCache<T> getPrimaryCache() {
             return null;
         }
     }

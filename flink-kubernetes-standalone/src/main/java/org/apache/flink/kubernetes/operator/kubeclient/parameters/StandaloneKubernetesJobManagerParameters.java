@@ -26,6 +26,7 @@ import org.apache.flink.kubernetes.kubeclient.parameters.KubernetesJobManagerPar
 import org.apache.flink.kubernetes.operator.standalone.StandaloneKubernetesConfigOptionsInternal;
 import org.apache.flink.kubernetes.operator.utils.StandaloneKubernetesUtils;
 import org.apache.flink.runtime.jobgraph.SavepointConfigOptions;
+import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -90,6 +91,13 @@ public class StandaloneKubernetesJobManagerParameters extends KubernetesJobManag
         return null;
     }
 
+    public String getSavepointPath() {
+        if (flinkConfig.contains(SavepointConfigOptions.SAVEPOINT_PATH)) {
+            return flinkConfig.get(SavepointConfigOptions.SAVEPOINT_PATH);
+        }
+        return null;
+    }
+
     public boolean isPipelineClasspathDefined() {
         return flinkConfig.contains(PipelineOptions.CLASSPATHS);
     }
@@ -99,5 +107,9 @@ public class StandaloneKubernetesJobManagerParameters extends KubernetesJobManag
             return flinkConfig.get(ApplicationConfiguration.APPLICATION_ARGS);
         }
         return null;
+    }
+
+    public boolean isHAEnabled() {
+        return HighAvailabilityMode.isHighAvailabilityModeActivated(flinkConfig);
     }
 }

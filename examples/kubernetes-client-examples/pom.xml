@@ -24,18 +24,23 @@ under the License.
     <parent>
         <groupId>org.apache.flink</groupId>
         <artifactId>flink-kubernetes-operator-parent</artifactId>
-        <version>1.2-SNAPSHOT</version>
+        <version>1.12-SNAPSHOT</version>
         <relativePath>../..</relativePath>
     </parent>
 
+    <!-- Given that this is an example skip maven deployment -->
+    <properties>
+        <maven.deploy.skip>true</maven.deploy.skip>
+    </properties>
+
     <artifactId>kubernetes-client-examples</artifactId>
-    <name>Flink Kubernetes client code Example</name>
+    <name>Flink Kubernetes Client Code Example</name>
 
     <dependencies>
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-kubernetes-operator</artifactId>
-            <version>1.2-SNAPSHOT</version>
+            <version>1.12-SNAPSHOT</version>
             <scope>compile</scope>
         </dependency>
     </dependencies>

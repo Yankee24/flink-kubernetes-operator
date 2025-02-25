@@ -23,7 +23,7 @@ under the License.
     <parent>
         <groupId>org.apache.flink</groupId>
         <artifactId>flink-kubernetes-operator-parent</artifactId>
-        <version>1.2-SNAPSHOT</version>
+        <version>1.12-SNAPSHOT</version>
         <relativePath>..</relativePath>
     </parent>
 
@@ -32,8 +32,11 @@ under the License.
     <packaging>jar</packaging>
 
     <properties>
-        <awaitility.version>4.1.0</awaitility.version>
         <plugins.tmp.dir>${project.build.directory}/plugins</plugins.tmp.dir>
+        <surefire.module.config>
+            <!-- required by FlinkConfigManagerTest -->
+            --add-opens=java.base/java.util=ALL-UNNAMED
+        </surefire.module.config>
     </properties>
 
     <dependencies>
@@ -41,39 +44,55 @@ under the License.
             <groupId>io.javaoperatorsdk</groupId>
             <artifactId>operator-framework</artifactId>
             <version>${operator.sdk.version}</version>
-        </dependency>
-
-        <dependency>
-            <groupId>io.fabric8</groupId>
-            <artifactId>kubernetes-client</artifactId>
-            <version>${fabric8.version}</version>
-            <!-- FLINK-29384, can be removed when fabric8 pulls snakeyaml 1.32+ -->
             <exclusions>
                 <exclusion>
-                    <groupId>org.yaml</groupId>
-                    <artifactId>snakeyaml</artifactId>
+                    <groupId>io.fabric8</groupId>
+                    <artifactId>kubernetes-httpclient-okhttp</artifactId>
                 </exclusion>
             </exclusions>
         </dependency>
 
-        <!-- FLINK-29384, can be removed when fabric8 pulls snakeyaml 1.32+ -->
         <dependency>
-            <groupId>org.yaml</groupId>
-            <artifactId>snakeyaml</artifactId>
-            <version>${snakeyaml.version}</version>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-kubernetes-operator-api</artifactId>
+            <version>${project.version}</version>
         </dependency>
 
         <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-autoscaler</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
+        <dependency>
+            <!-- https://github.com/fabric8io/kubernetes-client/blob/main/doc/FAQ.md#what-artifacts-should-my-project-depend-on-->
             <groupId>io.fabric8</groupId>
-            <artifactId>crd-generator-apt</artifactId>
+            <artifactId>kubernetes-httpclient-${fabric8.httpclient.impl}</artifactId>
             <version>${fabric8.version}</version>
-            <scope>provided</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.squareup.okhttp3</groupId>
+                    <artifactId>okhttp</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- Flink -->
         <dependency>
             <groupId>org.apache.flink</groupId>
+            <artifactId>flink-kubernetes</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.flink</groupId>
             <artifactId>flink-clients</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-core</artifactId>
             <version>${flink.version}</version>
         </dependency>
 
@@ -85,7 +104,13 @@ under the License.
 
         <dependency>
             <groupId>org.apache.flink</groupId>
-            <artifactId>flink-kubernetes-shaded</artifactId>
+            <artifactId>flink-metrics-core</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-kubernetes-standalone</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>
@@ -131,6 +156,15 @@ under the License.
 
         <!-- Test -->
         <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-autoscaler</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <classifier>tests</classifier>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
             <groupId>org.awaitility</groupId>
             <artifactId>awaitility</artifactId>
             <version>${awaitility.version}</version>
@@ -142,6 +176,19 @@ under the License.
             <artifactId>kubernetes-server-mock</artifactId>
             <version>${fabric8.version}</version>
             <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.squareup.okhttp3</groupId>
+                    <artifactId>mockwebserver</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>mockwebserver</artifactId>
+            <version>${okhttp.version}</version>
+            <scope>test</scope>
         </dependency>
 
         <dependency>
@@ -152,32 +199,34 @@ under the License.
         </dependency>
 
         <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter-params</artifactId>
-            <version>${junit.jupiter.version}</version>
+            <groupId>org.apache.curator</groupId>
+            <artifactId>curator-test</artifactId>
+            <version>${curator-test.version}</version>
+            <scope>test</scope>
+            <exclusions>
+                <!-- Exclude an older version of junit-jupiter-api -->
+                <exclusion>
+                    <groupId>org.junit.jupiter</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>log4j</groupId>
+                    <artifactId>log4j</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-kubernetes-operator-api</artifactId>
+            <version>${project.version}</version>
+            <classifier>tests</classifier>
             <scope>test</scope>
         </dependency>
 
-        <!-- okhttp -->
-        <!--
-            Regarding the okhttp explicit version
-            see https://github.com/fabric8io/kubernetes-client/issues/4290
-            and https://issues.apache.org/jira/browse/FLINK-28637
-            -->
         <dependency>
-            <groupId>com.squareup.okhttp3</groupId>
-            <artifactId>okhttp</artifactId>
-            <version>${okhttp.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.squareup.okhttp3</groupId>
-            <artifactId>logging-interceptor</artifactId>
-            <version>${okhttp.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.squareup.okhttp3</groupId>
-            <artifactId>mockwebserver</artifactId>
-            <version>${okhttp.version}</version>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-params</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -196,32 +245,6 @@ under the License.
 
         <plugins>
             <plugin>
-                <artifactId>maven-resources-plugin</artifactId>
-                <version>${maven-resources-plugin.version}</version>
-                <executions>
-                    <execution>
-                        <id>copy-resources</id>
-                        <phase>process-classes</phase>
-                        <goals>
-                            <goal>copy-resources</goal>
-                        </goals>
-                        <configuration>
-                            <outputDirectory>${project.basedir}/../helm/flink-kubernetes-operator/crds</outputDirectory>
-                            <resources>
-                                <resource>
-                                    <directory>${project.build.outputDirectory}/META-INF/fabric8</directory>
-                                    <includes>
-                                        <include>flinkdeployments.flink.apache.org-v1.yml</include>
-                                        <include>flinksessionjobs.flink.apache.org-v1.yml</include>
-                                    </includes>
-                                    <filtering>false</filtering>
-                                </resource>
-                            </resources>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
-            <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
                 <executions>
@@ -238,6 +261,12 @@ under the License.
                                     <artifact>*:*</artifact>
                                     <excludes>
                                         <exclude>META-INF/**/module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                                <filter>
+                                    <artifact>org.apache.flink:flink-kubernetes</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/versions/**/com/fasterxml/jackson/core/io/doubleparser/**</exclude>
                                     </excludes>
                                 </filter>
                             </filters>
@@ -336,6 +365,18 @@ under the License.
                 </executions>
             </plugin>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <!-- Description: https://github.com/git-commit-id/git-commit-id-maven-plugin
                     Used to show the git ref when starting the Flink Kubernetes operator. -->
                 <groupId>io.github.git-commit-id</groupId>
@@ -364,94 +405,9 @@ under the License.
                     <commitIdGenerationMode>full</commitIdGenerationMode>
                 </configuration>
             </plugin>
-            <plugin>
-                <artifactId>maven-antrun-plugin</artifactId>
-                <executions>
-                    <execution>
-                        <id>deployment-crd-compatibility-check</id>
-                        <phase>package</phase>
-                        <goals>
-                            <goal>run</goal>
-                        </goals>
-                        <configuration>
-                            <target>
-                                <java classname="org.apache.flink.kubernetes.operator.validation.CrdCompatibilityChecker"
-                                      fork="true" failonerror="true">
-                                    <classpath refid="maven.compile.classpath"/>
-                                    <arg value="file://${rootDir}/helm/flink-kubernetes-operator/crds/flinkdeployments.flink.apache.org-v1.yml"/>
-                                    <arg value="https://raw.githubusercontent.com/apache/flink-kubernetes-operator/release-1.0.0/helm/flink-kubernetes-operator/crds/flinkdeployments.flink.apache.org-v1.yml"/>
-                                    <arg value="https://raw.githubusercontent.com/apache/flink-kubernetes-operator/release-1.0.1/helm/flink-kubernetes-operator/crds/flinkdeployments.flink.apache.org-v1.yml"/>
-                                    <arg value="https://raw.githubusercontent.com/apache/flink-kubernetes-operator/release-1.1.0/helm/flink-kubernetes-operator/crds/flinkdeployments.flink.apache.org-v1.yml"/>
-                                </java>
-                            </target>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>sessionjob-crd-compatibility-check</id>
-                        <phase>package</phase>
-                        <goals>
-                            <goal>run</goal>
-                        </goals>
-                        <configuration>
-                            <target>
-                                <java classname="org.apache.flink.kubernetes.operator.validation.CrdCompatibilityChecker"
-                                      fork="true" failonerror="true">
-                                    <classpath refid="maven.compile.classpath"/>
-                                    <arg value="file://${rootDir}/helm/flink-kubernetes-operator/crds/flinksessionjobs.flink.apache.org-v1.yml"/>
-                                    <arg value="https://raw.githubusercontent.com/apache/flink-kubernetes-operator/release-1.0.0/helm/flink-kubernetes-operator/crds/flinksessionjobs.flink.apache.org-v1.yml"/>
-                                    <arg value="https://raw.githubusercontent.com/apache/flink-kubernetes-operator/release-1.0.1/helm/flink-kubernetes-operator/crds/flinksessionjobs.flink.apache.org-v1.yml"/>
-                                    <arg value="https://raw.githubusercontent.com/apache/flink-kubernetes-operator/release-1.1.0/helm/flink-kubernetes-operator/crds/flinksessionjobs.flink.apache.org-v1.yml"/>
-                                </java>
-                            </target>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
         </plugins>
     </build>
     <profiles>
-        <profile>
-            <id>generate-docs</id>
-            <activation>
-                <activeByDefault>false</activeByDefault>
-            </activation>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-javadoc-plugin</artifactId>
-                        <version>3.3.2</version>
-                        <executions>
-                            <execution>
-                                <id>doc</id>
-                                <phase>package</phase>
-                                <goals>
-                                    <goal>javadoc</goal>
-                                </goals>
-                            </execution>
-                        </executions>
-                        <configuration>
-                            <doclet>org.apache.flink.kubernetes.operator.docs.CrdReferenceDoclet</doclet>
-                            <docletArtifacts>
-                                <docletArtifact>
-                                    <groupId>org.apache.flink</groupId>
-                                    <artifactId>flink-kubernetes-operator</artifactId>
-                                    <version>${project.version}</version>
-                                </docletArtifact>
-                            </docletArtifacts>
-                            <additionalOptions>
-                                <additionalOption>--outputFile</additionalOption>
-                                <additionalOption>${project.basedir}/../docs/content/docs/custom-resource/reference.md
-                                </additionalOption>
-                                <additionalOption>--templateFile</additionalOption>
-                                <additionalOption>${project.basedir}/../docs/template/crd-ref.template</additionalOption>
-                            </additionalOptions>
-                            <useStandardDocletOptions>false</useStandardDocletOptions>
-                        </configuration>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
         <profile>
             <id>apache-release</id>
             <build>

@@ -21,16 +21,12 @@ kind: FlinkDeployment
 metadata:
   name: pod-template-example
 spec:
-  image: flink:1.15
-  flinkVersion: v1_15
+  image: flink:1.20
+  flinkVersion: v1_20
   flinkConfiguration:
     taskmanager.numberOfTaskSlots: "2"
   serviceAccount: flink
   podTemplate:
-    apiVersion: v1
-    kind: Pod
-    metadata:
-      name: pod-template
     spec:
       containers:
         # Do not change the main container name
@@ -57,15 +53,11 @@ spec:
       memory: "2048m"
       cpu: 1
     podTemplate:
-      apiVersion: v1
-      kind: Pod
-      metadata:
-        name: task-manager-pod-template
       spec:
         initContainers:
           # Sample init container for fetching remote artifacts
           - name: busybox
-            image: busybox:latest
+            image: busybox:1.35.0
             volumeMounts:
               - mountPath: /opt/flink/downloads
                 name: downloads
@@ -73,7 +65,7 @@ spec:
             - /bin/sh
             - -c
             - "wget -O /opt/flink/downloads/flink-examples-streaming.jar \
-              https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.15.2/flink-examples-streaming_2.12-1.15.2.jar"
+              https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.16.1/flink-examples-streaming_2.12-1.16.1.jar"
   taskManager:
     resource:
       memory: "2048m"

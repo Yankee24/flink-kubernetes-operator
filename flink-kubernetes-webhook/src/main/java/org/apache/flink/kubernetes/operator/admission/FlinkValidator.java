@@ -18,18 +18,23 @@
 package org.apache.flink.kubernetes.operator.admission;
 
 import org.apache.flink.kubernetes.operator.admission.informer.InformerManager;
-import org.apache.flink.kubernetes.operator.crd.CrdConstants;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.FlinkSessionJob;
+import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
+import org.apache.flink.kubernetes.operator.api.CrdConstants;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
+import org.apache.flink.kubernetes.operator.api.FlinkStateSnapshot;
+import org.apache.flink.kubernetes.operator.api.spec.JobKind;
+import org.apache.flink.kubernetes.operator.health.CanaryResourceManager;
+import org.apache.flink.kubernetes.operator.utils.FlinkStateSnapshotUtils;
 import org.apache.flink.kubernetes.operator.validation.FlinkResourceValidator;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.KubernetesResource;
 import io.fabric8.kubernetes.client.informers.cache.Cache;
-import io.javaoperatorsdk.admissioncontroller.NotAllowedException;
-import io.javaoperatorsdk.admissioncontroller.Operation;
-import io.javaoperatorsdk.admissioncontroller.validation.Validator;
+import io.javaoperatorsdk.webhook.admission.NotAllowedException;
+import io.javaoperatorsdk.webhook.admission.Operation;
+import io.javaoperatorsdk.webhook.admission.validation.Validator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -53,10 +58,16 @@ public class FlinkValidator implements Validator<HasMetadata> {
     public void validate(HasMetadata resource, Operation operation) throws NotAllowedException {
         LOG.debug("Validating resource {}", resource);
 
+        if (CanaryResourceManager.isCanaryResource(resource)) {
+            return;
+        }
+
         if (CrdConstants.KIND_FLINK_DEPLOYMENT.equals(resource.getKind())) {
             validateDeployment(resource);
         } else if (CrdConstants.KIND_SESSION_JOB.equals(resource.getKind())) {
             validateSessionJob(resource);
+        } else if (CrdConstants.KIND_FLINK_STATE_SNAPSHOT.equals(resource.getKind())) {
+            validateStateSnapshot(resource);
         } else {
             throw new NotAllowedException("Unexpected resource: " + resource.getKind());
         }
@@ -84,6 +95,43 @@ public class FlinkValidator implements Validator<HasMetadata> {
         for (FlinkResourceValidator validator : validators) {
             Optional<String> validationError =
                     validator.validateSessionJob(sessionJob, Optional.ofNullable(deployment));
+            if (validationError.isPresent()) {
+                throw new NotAllowedException(validationError.get());
+            }
+        }
+    }
+
+    private void validateStateSnapshot(KubernetesResource resource) {
+        FlinkStateSnapshot snapshot = objectMapper.convertValue(resource, FlinkStateSnapshot.class);
+
+        var jobRef = snapshot.getSpec().getJobReference();
+
+        AbstractFlinkResource<?, ?> targetResource = null;
+        if (jobRef != null && jobRef.getName() != null && jobRef.getKind() != null) {
+            var namespace =
+                    FlinkStateSnapshotUtils.getSnapshotJobReferenceResourceId(snapshot)
+                            .getNamespace()
+                            .orElseThrow(
+                                    () ->
+                                            new IllegalArgumentException(
+                                                    "Cannot determine namespace for snapshot"));
+            var key = Cache.namespaceKeyFunc(namespace, jobRef.getName());
+
+            if (JobKind.FLINK_DEPLOYMENT.equals(jobRef.getKind())) {
+                targetResource =
+                        informerManager.getFlinkDepInformer(namespace).getStore().getByKey(key);
+            } else if (JobKind.FLINK_SESSION_JOB.equals(jobRef.getKind())) {
+                targetResource =
+                        informerManager
+                                .getFlinkSessionJobInformer(namespace)
+                                .getStore()
+                                .getByKey(key);
+            }
+        }
+
+        for (FlinkResourceValidator validator : validators) {
+            Optional<String> validationError =
+                    validator.validateStateSnapshot(snapshot, Optional.ofNullable(targetResource));
             if (validationError.isPresent()) {
                 throw new NotAllowedException(validationError.get());
             }

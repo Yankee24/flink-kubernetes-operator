@@ -19,10 +19,11 @@
 package org.apache.flink.kubernetes.operator.listener;
 
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.FlinkSessionJob;
-import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
-import org.apache.flink.kubernetes.operator.crd.status.FlinkSessionJobStatus;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
+import org.apache.flink.kubernetes.operator.api.listener.FlinkResourceListener;
+import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
+import org.apache.flink.kubernetes.operator.api.status.FlinkSessionJobStatus;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -30,38 +31,43 @@ import java.util.List;
 /** Listener implementation for testing. */
 public class TestingListener implements FlinkResourceListener {
 
-    public List<StatusUpdateContext<?, ?>> updates = new ArrayList<>();
-    public List<ResourceEventContext<?>> events = new ArrayList<>();
+    public List<StatusUpdateContext<?, ?>> flinkResourceUpdates = new ArrayList<>();
+    public List<ResourceEventContext<?>> flinkResourceEvents = new ArrayList<>();
+    public List<FlinkStateSnapshotStatusUpdateContext> flinkStateSnapshotUpdates =
+            new ArrayList<>();
+    public List<FlinkStateSnapshotEventContext> flinkStateSnapshotEvents = new ArrayList<>();
     public Configuration config;
-
-    public void onStatusUpdate(StatusUpdateContext<?, ?> ctx) {
-        updates.add(ctx);
-    }
-
-    public void onEvent(ResourceEventContext<?> ctx) {
-        events.add(ctx);
-    }
 
     @Override
     public void onDeploymentStatusUpdate(
             StatusUpdateContext<FlinkDeployment, FlinkDeploymentStatus> ctx) {
-        onStatusUpdate(ctx);
+        flinkResourceUpdates.add(ctx);
     }
 
     @Override
     public void onDeploymentEvent(ResourceEventContext<FlinkDeployment> ctx) {
-        onEvent(ctx);
+        flinkResourceEvents.add(ctx);
     }
 
     @Override
     public void onSessionJobStatusUpdate(
             StatusUpdateContext<FlinkSessionJob, FlinkSessionJobStatus> ctx) {
-        onStatusUpdate(ctx);
+        flinkResourceUpdates.add(ctx);
     }
 
     @Override
     public void onSessionJobEvent(ResourceEventContext<FlinkSessionJob> ctx) {
-        onEvent(ctx);
+        flinkResourceEvents.add(ctx);
+    }
+
+    @Override
+    public void onStateSnapshotEvent(FlinkStateSnapshotEventContext ctx) {
+        flinkStateSnapshotEvents.add(ctx);
+    }
+
+    @Override
+    public void onStateSnapshotStatusUpdate(FlinkStateSnapshotStatusUpdateContext ctx) {
+        flinkStateSnapshotUpdates.add(ctx);
     }
 
     @Override

@@ -18,17 +18,19 @@
 package org.apache.flink.kubernetes.operator.utils;
 
 import org.apache.flink.kubernetes.operator.TestUtils;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.status.FlinkDeploymentStatus;
-import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
+import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.metrics.MetricManager;
 
 import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.fabric8.kubernetes.client.server.mock.KubernetesMockServer;
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test for {@link StatusRecorder}. */
 @EnableKubernetesMockClient(crud = true)
@@ -41,23 +43,40 @@ public class StatusRecorderTest {
     public void testPatchOnlyWhenChanged() throws InterruptedException {
         var helper =
                 new StatusRecorder<FlinkDeployment, FlinkDeploymentStatus>(
-                        kubernetesClient, new MetricManager<>(), (e, s) -> {});
+                        new MetricManager<>(), (e, s) -> {});
         var deployment = TestUtils.buildApplicationCluster();
         kubernetesClient.resource(deployment).createOrReplace();
         var lastRequest = mockServer.getLastRequest();
 
-        helper.patchAndCacheStatus(deployment);
-        assertTrue(mockServer.getLastRequest() != lastRequest);
+        helper.patchAndCacheStatus(deployment, kubernetesClient);
+        assertThat(lastRequest).isNotSameAs(mockServer.getLastRequest());
         lastRequest = mockServer.getLastRequest();
         deployment.getStatus().getReconciliationStatus().setState(ReconciliationState.ROLLING_BACK);
-        helper.patchAndCacheStatus(deployment);
+        helper.patchAndCacheStatus(deployment, kubernetesClient);
 
         // We intentionally compare references
-        assertTrue(mockServer.getLastRequest() != lastRequest);
+        assertThat(lastRequest).isNotSameAs(mockServer.getLastRequest());
         lastRequest = mockServer.getLastRequest();
 
         // No update
-        helper.patchAndCacheStatus(deployment);
-        assertTrue(mockServer.getLastRequest() == lastRequest);
+        helper.patchAndCacheStatus(deployment, kubernetesClient);
+        assertThat(lastRequest).isSameAs(mockServer.getLastRequest());
+    }
+
+    @Test
+    public void testNullLatestResource() {
+        var statusRecorder =
+                new StatusRecorder<FlinkDeployment, FlinkDeploymentStatus>(
+                        new MetricManager<>(), (e, s) -> {});
+
+        var resource = TestUtils.buildApplicationCluster();
+        var cause = new KubernetesClientException("dummy");
+        assertThatThrownBy(
+                        () ->
+                                statusRecorder.handleLockingError(
+                                        resource, null, kubernetesClient, 0, cause))
+                .isInstanceOf(KubernetesClientException.class)
+                .hasMessage("Failed to retrieve latest resource")
+                .hasCause(cause);
     }
 }

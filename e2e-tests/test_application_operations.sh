@@ -20,14 +20,15 @@
 # This script tests the application job operations:
 # 1. Trigger savepoint
 # 2. last state mode upgrade
-source "$(dirname "$0")"/utils.sh
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+source "${SCRIPT_DIR}/utils.sh"
 
 CLUSTER_ID="flink-example-statemachine"
-APPLICATION_YAML="e2e-tests/data/flinkdep-cr.yaml"
+APPLICATION_YAML="${SCRIPT_DIR}/data/flinkdep-cr.yaml"
 APPLICATION_IDENTIFIER="flinkdep/$CLUSTER_ID"
 TIMEOUT=300
 
-on_exit cleanup_and_exit $APPLICATION_YAML $TIMEOUT $CLUSTER_ID
+on_exit cleanup_and_exit "$APPLICATION_YAML" $TIMEOUT $CLUSTER_ID
 
 retry_times 5 30 "kubectl apply -f $APPLICATION_YAML" || exit 1
 
@@ -44,8 +45,8 @@ job_id=$(kubectl logs $jm_pod_name -c flink-main-container | grep -E -o 'Job [a-
 # Testing trigger savepoint
 kubectl patch $APPLICATION_IDENTIFIER --type merge --patch '{"spec":{"job": {"savepointTriggerNonce": 123456 } } }'
 wait_for_logs $jm_pod_name "Triggering savepoint for job" ${TIMEOUT} || exit 1
-wait_for_status $APPLICATION_IDENTIFIER '.status.jobStatus.savepointInfo.triggerId' "" $TIMEOUT || exit 1
-wait_for_status $APPLICATION_IDENTIFIER '.status.jobStatus.savepointInfo.triggerTimestamp' 0 $TIMEOUT || exit 1
+wait_for_status $APPLICATION_IDENTIFIER '.status.jobStatus.savepointInfo.triggerId' null $TIMEOUT || exit 1
+wait_for_status $APPLICATION_IDENTIFIER '.status.jobStatus.savepointInfo.triggerTimestamp' null $TIMEOUT || exit 1
 location=$(kubectl get $APPLICATION_IDENTIFIER -o yaml | yq '.status.jobStatus.savepointInfo.lastSavepoint.location')
 if [ "$location" == "" ];then
   echo "lost savepoint location"
@@ -55,7 +56,7 @@ fi
 # Testing last-state mode upgrade
 # Update the FlinkDeployment and trigger the last state upgrade
 kubectl patch flinkdep ${CLUSTER_ID} --type merge --patch '{"spec":{"job": {"parallelism": 1 } } }'
-kubectl wait --for=delete pod --timeout=${TIMEOUT}s --selector="app=${CLUSTER_ID}"
+kubectl wait --for=delete deployment --timeout=${TIMEOUT}s --selector="app=${CLUSTER_ID}"
 wait_for_jobmanager_running $CLUSTER_ID $TIMEOUT
 jm_pod_name=$(get_jm_pod_name $CLUSTER_ID)
 
@@ -67,5 +68,3 @@ wait_for_status flinkdep/flink-example-statemachine '.status.jobStatus.state' RU
 assert_available_slots 1 $CLUSTER_ID
 
 echo "Successfully run the last-state upgrade test"
-
-

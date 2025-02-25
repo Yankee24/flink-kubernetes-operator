@@ -21,15 +21,18 @@ import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.TestUtils;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
+import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
+import org.apache.flink.kubernetes.operator.api.lifecycle.ResourceLifecycleState;
+import org.apache.flink.kubernetes.operator.api.spec.JobState;
+import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.config.FlinkOperatorConfiguration;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.spec.JobState;
-import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.metrics.CustomResourceMetrics;
 import org.apache.flink.kubernetes.operator.metrics.KubernetesOperatorMetricOptions;
 import org.apache.flink.kubernetes.operator.metrics.MetricManager;
 import org.apache.flink.kubernetes.operator.metrics.OperatorMetricUtils;
+import org.apache.flink.kubernetes.operator.metrics.TestingMetricListener;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.metrics.Histogram;
 
@@ -41,17 +44,18 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.LongStream;
 
-import static org.apache.flink.kubernetes.operator.metrics.lifecycle.ResourceLifecycleState.CREATED;
-import static org.apache.flink.kubernetes.operator.metrics.lifecycle.ResourceLifecycleState.DEPLOYED;
-import static org.apache.flink.kubernetes.operator.metrics.lifecycle.ResourceLifecycleState.FAILED;
-import static org.apache.flink.kubernetes.operator.metrics.lifecycle.ResourceLifecycleState.ROLLED_BACK;
-import static org.apache.flink.kubernetes.operator.metrics.lifecycle.ResourceLifecycleState.ROLLING_BACK;
-import static org.apache.flink.kubernetes.operator.metrics.lifecycle.ResourceLifecycleState.STABLE;
-import static org.apache.flink.kubernetes.operator.metrics.lifecycle.ResourceLifecycleState.SUSPENDED;
-import static org.apache.flink.kubernetes.operator.metrics.lifecycle.ResourceLifecycleState.UPGRADING;
+import static org.apache.flink.kubernetes.operator.api.lifecycle.ResourceLifecycleState.CREATED;
+import static org.apache.flink.kubernetes.operator.api.lifecycle.ResourceLifecycleState.DEPLOYED;
+import static org.apache.flink.kubernetes.operator.api.lifecycle.ResourceLifecycleState.FAILED;
+import static org.apache.flink.kubernetes.operator.api.lifecycle.ResourceLifecycleState.ROLLED_BACK;
+import static org.apache.flink.kubernetes.operator.api.lifecycle.ResourceLifecycleState.ROLLING_BACK;
+import static org.apache.flink.kubernetes.operator.api.lifecycle.ResourceLifecycleState.STABLE;
+import static org.apache.flink.kubernetes.operator.api.lifecycle.ResourceLifecycleState.SUSPENDED;
+import static org.apache.flink.kubernetes.operator.api.lifecycle.ResourceLifecycleState.UPGRADING;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Test for resource lifecycle metrics. */
 public class ResourceLifecycleMetricsTest {
@@ -73,10 +77,10 @@ public class ResourceLifecycleMetricsTest {
         application.getStatus().setError("errr");
         assertEquals(STABLE, application.getStatus().getLifecycleState());
 
-        application.getStatus().getJobStatus().setState(JobStatus.FAILED.name());
+        application.getStatus().getJobStatus().setState(JobStatus.FAILED);
         assertEquals(FAILED, application.getStatus().getLifecycleState());
 
-        application.getStatus().setError("");
+        application.getStatus().setError(null);
 
         application
                 .getStatus()
@@ -84,14 +88,14 @@ public class ResourceLifecycleMetricsTest {
                 .setState(ReconciliationState.ROLLING_BACK);
         assertEquals(ROLLING_BACK, application.getStatus().getLifecycleState());
 
-        application.getStatus().getJobStatus().setState(JobStatus.RECONCILING.name());
+        application.getStatus().getJobStatus().setState(JobStatus.RECONCILING);
         application.getStatus().getReconciliationStatus().setState(ReconciliationState.ROLLED_BACK);
         assertEquals(ROLLED_BACK, application.getStatus().getLifecycleState());
 
-        application.getStatus().getJobStatus().setState(JobStatus.FAILED.name());
+        application.getStatus().getJobStatus().setState(JobStatus.FAILED);
         assertEquals(FAILED, application.getStatus().getLifecycleState());
 
-        application.getStatus().getJobStatus().setState(JobStatus.RUNNING.name());
+        application.getStatus().getJobStatus().setState(JobStatus.RUNNING);
         application.getSpec().getJob().setState(JobState.SUSPENDED);
         ReconciliationUtils.updateStatusForDeployedSpec(application, new Configuration());
         assertEquals(SUSPENDED, application.getStatus().getLifecycleState());
@@ -129,7 +133,7 @@ public class ResourceLifecycleMetricsTest {
         lifecycleTracker.onUpdate(UPGRADING, Instant.ofEpochMilli(ts += 1000));
         lifecycleTracker.onUpdate(DEPLOYED, Instant.ofEpochMilli(ts += 1000));
         lifecycleTracker.onUpdate(DEPLOYED, Instant.ofEpochMilli(ts += 1000));
-        lifecycleTracker.onUpdate(STABLE, Instant.ofEpochMilli(ts += 1000));
+        lifecycleTracker.onUpdate(STABLE, Instant.ofEpochMilli(ts + 1000));
 
         validateTransition(transitionHistos, "Resume", 1, 4);
         validateTransition(transitionHistos, "Upgrade", 1, 5);
@@ -157,7 +161,7 @@ public class ResourceLifecycleMetricsTest {
         var conf = new Configuration();
         var metricManager =
                 MetricManager.createFlinkDeploymentMetricManager(
-                        new FlinkConfigManager(conf), TestUtils.createTestMetricGroup(conf));
+                        conf, TestUtils.createTestMetricGroup(conf));
         var lifeCycleMetrics = getLifeCycleMetrics(metricManager);
 
         metricManager.onUpdate(dep1);
@@ -192,7 +196,7 @@ public class ResourceLifecycleMetricsTest {
                 false);
         metricManager =
                 MetricManager.createFlinkDeploymentMetricManager(
-                        new FlinkConfigManager(conf), TestUtils.createTestMetricGroup(conf));
+                        conf, TestUtils.createTestMetricGroup(conf));
         lifeCycleMetrics = getLifeCycleMetrics(metricManager);
 
         metricManager.onUpdate(dep1);
@@ -217,7 +221,7 @@ public class ResourceLifecycleMetricsTest {
         conf.set(KubernetesOperatorMetricOptions.OPERATOR_LIFECYCLE_METRICS_ENABLED, false);
         metricManager =
                 MetricManager.createFlinkDeploymentMetricManager(
-                        new FlinkConfigManager(conf), TestUtils.createTestMetricGroup(conf));
+                        conf, TestUtils.createTestMetricGroup(conf));
         assertNull(getLifeCycleMetrics(metricManager));
 
         metricManager.onUpdate(dep1);
@@ -225,12 +229,57 @@ public class ResourceLifecycleMetricsTest {
         metricManager.onUpdate(dep3);
     }
 
-    public static LifecycleMetrics<FlinkDeployment> getLifeCycleMetrics(
-            MetricManager<FlinkDeployment> metricManager) {
-        for (CustomResourceMetrics<FlinkDeployment> metrics :
-                metricManager.getRegisteredMetrics()) {
+    @Test
+    public void testGlobalHistoNames() {
+        var conf = new Configuration();
+        var testingMetricListener = new TestingMetricListener(new Configuration());
+        var deploymentMetricManager =
+                MetricManager.createFlinkDeploymentMetricManager(
+                        conf, testingMetricListener.getMetricGroup());
+        var deploymentLifecycleMetrics = getLifeCycleMetrics(deploymentMetricManager);
+        deploymentLifecycleMetrics.onUpdate(TestUtils.buildApplicationCluster());
+        testGlobalHistoNames(testingMetricListener, FlinkDeployment.class);
+
+        var sessionJobMetricManager =
+                MetricManager.createFlinkSessionJobMetricManager(
+                        conf, testingMetricListener.getMetricGroup());
+        var sessionJobLifecycleMetrics = getLifeCycleMetrics(sessionJobMetricManager);
+        sessionJobLifecycleMetrics.onUpdate(TestUtils.buildSessionJob());
+
+        testGlobalHistoNames(testingMetricListener, FlinkSessionJob.class);
+    }
+
+    private void testGlobalHistoNames(TestingMetricListener metricListener, Class<?> resoureClass) {
+        for (var state : ResourceLifecycleState.values()) {
+            assertTrue(
+                    metricListener
+                            .getHistogram(
+                                    String.format(
+                                            metricListener.getMetricId(
+                                                    "%s.Lifecycle.State.%s.TimeSeconds"),
+                                            resoureClass.getSimpleName(),
+                                            state))
+                            .isPresent());
+        }
+
+        for (var transition : LifecycleMetrics.TRACKED_TRANSITIONS) {
+            assertTrue(
+                    metricListener
+                            .getHistogram(
+                                    String.format(
+                                            metricListener.getMetricId(
+                                                    "%s.Lifecycle.Transition.%s.TimeSeconds"),
+                                            resoureClass.getSimpleName(),
+                                            transition.metricName))
+                            .isPresent());
+        }
+    }
+
+    public static <T extends AbstractFlinkResource<?, ?>> LifecycleMetrics<T> getLifeCycleMetrics(
+            MetricManager<T> metricManager) {
+        for (CustomResourceMetrics<?> metrics : metricManager.getRegisteredMetrics()) {
             if (metrics instanceof LifecycleMetrics) {
-                return (LifecycleMetrics<FlinkDeployment>) metrics;
+                return (LifecycleMetrics<T>) metrics;
             }
         }
         return null;

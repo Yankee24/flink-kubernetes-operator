@@ -19,30 +19,34 @@ package org.apache.flink.kubernetes.operator.utils;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.RestOptions;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkDeploymentSpec;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
 import org.apache.flink.kubernetes.operator.exception.ReconciliationException;
 import org.apache.flink.util.Preconditions;
 
 import io.fabric8.kubernetes.api.model.HasMetadata;
+import io.fabric8.kubernetes.api.model.IntOrString;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.OwnerReference;
 import io.fabric8.kubernetes.api.model.OwnerReferenceBuilder;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.networking.v1.HTTPIngressRuleValueBuilder;
-import io.fabric8.kubernetes.api.model.networking.v1.Ingress;
 import io.fabric8.kubernetes.api.model.networking.v1.IngressBuilder;
 import io.fabric8.kubernetes.api.model.networking.v1.IngressRule;
 import io.fabric8.kubernetes.api.model.networking.v1.IngressRuleBuilder;
+import io.fabric8.kubernetes.api.model.networking.v1beta1.IngressTLS;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.module.ModuleDescriptor;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /** Ingress utilities. */
 public class IngressUtils {
@@ -65,18 +69,7 @@ public class IngressUtils {
             KubernetesClient client) {
 
         if (spec.getIngress() != null) {
-            Ingress ingress =
-                    new IngressBuilder()
-                            .withNewMetadata()
-                            .withAnnotations(spec.getIngress().getAnnotations())
-                            .withName(objectMeta.getName())
-                            .withNamespace(objectMeta.getNamespace())
-                            .endMetadata()
-                            .withNewSpec()
-                            .withIngressClassName(spec.getIngress().getClassName())
-                            .withRules(getIngressRule(objectMeta, spec, effectiveConfig))
-                            .endSpec()
-                            .build();
+            HasMetadata ingress = getIngress(objectMeta, spec, effectiveConfig, client);
 
             Deployment deployment =
                     client.apps()
@@ -92,6 +85,59 @@ public class IngressUtils {
 
             LOG.info("Updating ingress rules {}", ingress);
             client.resourceList(ingress).inNamespace(objectMeta.getNamespace()).createOrReplace();
+        }
+    }
+
+    private static HasMetadata getIngress(
+            ObjectMeta objectMeta,
+            FlinkDeploymentSpec spec,
+            Configuration effectiveConfig,
+            KubernetesClient client) {
+        if (ingressInNetworkingV1(client)) {
+            return new IngressBuilder()
+                    .withNewMetadata()
+                    .withLabels(spec.getIngress().getLabels())
+                    .withAnnotations(spec.getIngress().getAnnotations())
+                    .withName(objectMeta.getName())
+                    .withNamespace(objectMeta.getNamespace())
+                    .endMetadata()
+                    .withNewSpec()
+                    .withIngressClassName(spec.getIngress().getClassName())
+                    .withTls(spec.getIngress().getTls())
+                    .withRules(getIngressRule(objectMeta, spec, effectiveConfig))
+                    .endSpec()
+                    .build();
+        } else {
+            List<IngressTLS> ingressTLS =
+                    Optional.ofNullable(spec.getIngress().getTls())
+                            .map(
+                                    list ->
+                                            list.stream()
+                                                    .map(
+                                                            v1Tls -> {
+                                                                IngressTLS v1beta1Tls =
+                                                                        new IngressTLS();
+                                                                v1beta1Tls.setHosts(
+                                                                        v1Tls.getHosts());
+                                                                v1beta1Tls.setSecretName(
+                                                                        v1Tls.getSecretName());
+                                                                return v1beta1Tls;
+                                                            })
+                                                    .collect(Collectors.toList()))
+                            .orElse(Collections.emptyList());
+            return new io.fabric8.kubernetes.api.model.networking.v1beta1.IngressBuilder()
+                    .withNewMetadata()
+                    .withAnnotations(spec.getIngress().getAnnotations())
+                    .withLabels(spec.getIngress().getLabels())
+                    .withName(objectMeta.getName())
+                    .withNamespace(objectMeta.getNamespace())
+                    .endMetadata()
+                    .withNewSpec()
+                    .withIngressClassName(spec.getIngress().getClassName())
+                    .withTls(ingressTLS)
+                    .withRules(getIngressRuleForV1beta1(objectMeta, spec, effectiveConfig))
+                    .endSpec()
+                    .build();
         }
     }
 
@@ -118,6 +164,47 @@ public class IngressUtils {
                         .withNumber(restPort)
                         .endPort()
                         .endService()
+                        .endBackend()
+                        .endPath()
+                        .build());
+
+        if (!StringUtils.isBlank(ingressUrl.getHost())) {
+            ingressRuleBuilder.withHost(ingressUrl.getHost());
+        }
+
+        if (!StringUtils.isBlank(ingressUrl.getPath())) {
+            ingressRuleBuilder
+                    .editHttp()
+                    .editFirstPath()
+                    .withPath(ingressUrl.getPath())
+                    .endPath()
+                    .endHttp();
+        }
+        return ingressRuleBuilder.build();
+    }
+
+    private static io.fabric8.kubernetes.api.model.networking.v1beta1.IngressRule
+            getIngressRuleForV1beta1(
+                    ObjectMeta objectMeta,
+                    FlinkDeploymentSpec spec,
+                    Configuration effectiveConfig) {
+        final String clusterId = objectMeta.getName();
+        final int restPort = effectiveConfig.getInteger(RestOptions.PORT);
+
+        URL ingressUrl =
+                getIngressUrl(
+                        spec.getIngress().getTemplate(),
+                        objectMeta.getName(),
+                        objectMeta.getNamespace());
+
+        io.fabric8.kubernetes.api.model.networking.v1beta1.IngressRuleBuilder ingressRuleBuilder =
+                new io.fabric8.kubernetes.api.model.networking.v1beta1.IngressRuleBuilder();
+        ingressRuleBuilder.withHttp(
+                new io.fabric8.kubernetes.api.model.networking.v1beta1.HTTPIngressRuleValueBuilder()
+                        .addNewPath()
+                        .withNewBackend()
+                        .withServiceName(clusterId + REST_SVC_NAME_SUFFIX)
+                        .withServicePort(new IntOrString(restPort))
                         .endBackend()
                         .endPath()
                         .build());
@@ -174,5 +261,25 @@ public class IngressUtils {
             url = "http://" + url;
         }
         return url;
+    }
+
+    public static boolean ingressInNetworkingV1(KubernetesClient client) {
+        // networking.k8s.io/v1/Ingress is available in K8s 1.19
+        // See:
+        // https://kubernetes.io/docs/reference/using-api/deprecation-guide/
+        // https://kubernetes.io/blog/2021/07/14/upcoming-changes-in-kubernetes-1-22/
+        String serverVersion =
+                client.getKubernetesVersion().getMajor()
+                        + "."
+                        + client.getKubernetesVersion().getMinor();
+        String targetVersion = "1.19";
+        try {
+            return ModuleDescriptor.Version.parse(serverVersion)
+                            .compareTo(ModuleDescriptor.Version.parse(targetVersion))
+                    >= 0;
+        } catch (IllegalArgumentException e) {
+            LOG.warn("Failed to parse Kubernetes server version: {}", serverVersion);
+            return serverVersion.compareTo(targetVersion) >= 0;
+        }
     }
 }

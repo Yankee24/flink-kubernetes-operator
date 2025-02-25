@@ -21,8 +21,8 @@ kind: FlinkDeployment
 metadata:
   name: basic-session-deployment-only-example
 spec:
-  image: flink:1.15
-  flinkVersion: v1_15
+  image: flink:1.20
+  flinkVersion: v1_20
   flinkConfiguration:
     taskmanager.numberOfTaskSlots: "2"
   serviceAccount: flink

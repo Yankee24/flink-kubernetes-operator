@@ -19,6 +19,8 @@ package org.apache.flink.kubernetes.operator.metrics;
 
 import org.apache.flink.configuration.ConfigOption;
 
+import java.time.Duration;
+
 import static org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions.operatorConfig;
 
 /** Configuration options for metrics. */
@@ -43,6 +45,21 @@ public class KubernetesOperatorMetricOptions {
                     .defaultValue(true)
                     .withDescription(
                             "Enable KubernetesClient metrics for measuring the HTTP traffic to the Kubernetes API Server.");
+
+    public static final ConfigOption<Boolean>
+            OPERATOR_KUBERNETES_CLIENT_METRICS_HTTP_RESPONSE_CODE_GROUPS_ENABLED =
+                    operatorConfig("kubernetes.client.metrics.http.response.code.groups.enabled")
+                            .booleanType()
+                            .defaultValue(false)
+                            .withDescription(
+                                    "Enable KubernetesClient metrics for measuring the HTTP traffic to the Kubernetes API Server by response code group, e.g. 1xx, 2xx.");
+
+    public static final ConfigOption<Duration> OPERATOR_KUBERNETES_SLOW_REQUEST_THRESHOLD =
+            operatorConfig("kubernetes.client.metrics.slow.request.threshold")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(5))
+                    .withDescription(
+                            "Threshold value that triggers slow request counter for Kubernetes client metrics");
 
     public static final ConfigOption<Boolean> OPERATOR_RESOURCE_METRICS_ENABLED =
             operatorConfig("resource.metrics.enabled")

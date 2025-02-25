@@ -17,43 +17,35 @@
 
 package org.apache.flink.kubernetes.operator.observer.deployment;
 
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
-import org.apache.flink.kubernetes.operator.service.FlinkService;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
+import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
-
-import io.javaoperatorsdk.operator.api.reconciler.Context;
 
 import java.util.concurrent.TimeoutException;
 
 /** The observer of the {@link org.apache.flink.kubernetes.operator.config.Mode#SESSION} cluster. */
-public class SessionObserver extends AbstractDeploymentObserver {
+public class SessionObserver extends AbstractFlinkDeploymentObserver {
 
-    public SessionObserver(
-            FlinkService flinkService,
-            FlinkConfigManager configManager,
-            EventRecorder eventRecorder) {
-        super(flinkService, configManager, eventRecorder);
+    public SessionObserver(EventRecorder eventRecorder) {
+        super(eventRecorder);
     }
 
     @Override
-    public void observeFlinkCluster(
-            FlinkDeployment deployment, Context<?> context, Configuration deployedConfig) {
+    public void observeFlinkCluster(FlinkResourceContext<FlinkDeployment> ctx) {
         // Check if session cluster can serve rest calls following our practice in JobObserver
         try {
             logger.debug("Observing session cluster");
-            flinkService.listJobs(deployedConfig);
-            var rs = deployment.getStatus().getReconciliationStatus();
+            ctx.getFlinkService().getClusterInfo(ctx.getObserveConfig(), null);
+            var rs = ctx.getResource().getStatus().getReconciliationStatus();
             if (rs.getState() == ReconciliationState.DEPLOYED) {
                 rs.markReconciledSpecAsStable();
             }
         } catch (Exception e) {
-            logger.error("REST service in session cluster is bad now", e);
+            logger.error("REST service in session cluster timed out", e);
             if (e instanceof TimeoutException) {
                 // check for problems with the underlying deployment
-                observeJmDeployment(deployment, context, deployedConfig);
+                observeJmDeployment(ctx);
             }
         }
     }

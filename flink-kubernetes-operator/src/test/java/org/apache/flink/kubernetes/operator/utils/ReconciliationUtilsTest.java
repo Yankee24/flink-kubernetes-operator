@@ -18,17 +18,13 @@
 package org.apache.flink.kubernetes.operator.utils;
 
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.kubernetes.operator.TestUtils;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.spec.JobState;
+import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
+import org.apache.flink.kubernetes.operator.api.utils.BaseTestUtils;
 import org.apache.flink.kubernetes.operator.config.FlinkOperatorConfiguration;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkDeploymentSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.JobState;
-import org.apache.flink.kubernetes.operator.crd.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.javaoperatorsdk.operator.api.reconciler.UpdateControl;
 import org.junit.jupiter.api.Test;
 
@@ -45,7 +41,7 @@ public class ReconciliationUtilsTest {
 
     @Test
     public void testRescheduleUpgradeImmediately() {
-        FlinkDeployment app = TestUtils.buildApplicationCluster();
+        FlinkDeployment app = BaseTestUtils.buildApplicationCluster();
         app.getSpec().getJob().setState(JobState.RUNNING);
         app.getStatus().getReconciliationStatus().setState(ReconciliationState.DEPLOYED);
         ReconciliationUtils.updateStatusForDeployedSpec(app, new Configuration());
@@ -69,31 +65,14 @@ public class ReconciliationUtilsTest {
     }
 
     @Test
-    public void testSpecSerializationWithVersion() throws JsonProcessingException {
-        FlinkDeployment app = TestUtils.buildApplicationCluster();
-        app.getMetadata().setGeneration(12L);
-        String serialized = ReconciliationUtils.writeSpecWithMeta(app.getSpec(), app);
-        ObjectNode node = (ObjectNode) new ObjectMapper().readTree(serialized);
-
-        ObjectNode internalMeta =
-                (ObjectNode) node.get(ReconciliationUtils.INTERNAL_METADATA_JSON_KEY);
-        assertEquals("flink.apache.org/v1beta1", internalMeta.get("apiVersion").asText());
-        assertEquals(12L, internalMeta.get("metadata").get("generation").asLong());
-        assertEquals(
-                app.getSpec(),
-                ReconciliationUtils.deserializeSpecWithMeta(serialized, FlinkDeploymentSpec.class)
-                        .f0);
-
-        // test backward compatibility
-        String oldSerialized =
-                "{\"job\":{\"jarURI\":\"local:///opt/flink/examples/streaming/StateMachineExample.jar\",\"parallelism\":2,\"entryClass\":null,\"args\":[],\"state\":\"running\",\"savepointTriggerNonce\":null,\"initialSavepointPath\":null,\"upgradeMode\":\"stateless\",\"allowNonRestoredState\":null},\"restartNonce\":null,\"flinkConfiguration\":{\"taskmanager.numberOfTaskSlots\":\"2\"},\"image\":\"flink:1.15\",\"imagePullPolicy\":null,\"serviceAccount\":\"flink\",\"flinkVersion\":\"v1_15\",\"ingress\":null,\"podTemplate\":null,\"jobManager\":{\"resource\":{\"cpu\":1.0,\"memory\":\"2048m\"},\"replicas\":1,\"podTemplate\":null},\"taskManager\":{\"resource\":{\"cpu\":1.0,\"memory\":\"2048m\"},\"podTemplate\":null},\"logConfiguration\":null,\"apiVersion\":\"v1beta1\"}";
-
-        var migrated =
-                ReconciliationUtils.deserializeSpecWithMeta(
-                        oldSerialized, FlinkDeploymentSpec.class);
-        assertEquals(
-                "local:///opt/flink/examples/streaming/StateMachineExample.jar",
-                migrated.f0.getJob().getJarURI());
-        assertNull(migrated.f1);
+    public void testObservedGenerationStatus() throws Exception {
+        FlinkDeployment app = BaseTestUtils.buildApplicationCluster();
+        app.getSpec().getJob().setState(JobState.RUNNING);
+        app.getStatus().getReconciliationStatus().setState(ReconciliationState.DEPLOYED);
+        app.getMetadata().setGeneration(1L);
+        assertNull(app.getStatus().getObservedGeneration());
+        ReconciliationUtils.updateStatusForDeployedSpec(app, new Configuration());
+        ReconciliationUtils.updateStatusBeforeDeploymentAttempt(app, new Configuration());
+        assertEquals(1L, app.getStatus().getObservedGeneration());
     }
 }

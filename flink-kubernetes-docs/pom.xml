@@ -23,7 +23,7 @@ under the License.
     <parent>
         <groupId>org.apache.flink</groupId>
         <artifactId>flink-kubernetes-operator-parent</artifactId>
-        <version>1.2-SNAPSHOT</version>
+        <version>1.12-SNAPSHOT</version>
         <relativePath>..</relativePath>
     </parent>
 
@@ -32,7 +32,6 @@ under the License.
 
     <properties>
         <generated.docs.dir>./docs/layouts/shortcodes/generated</generated.docs.dir>
-        <assertj.version>3.21.0</assertj.version>
     </properties>
 
     <dependencies>
@@ -43,11 +42,24 @@ under the License.
             <scope>provided</scope>
         </dependency>
 
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-autoscaler</artifactId>
+            <version>${project.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-autoscaler-standalone</artifactId>
+            <version>${project.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-api</artifactId>
-            <version>${junit.jupiter.version}</version>
             <scope>test</scope>
         </dependency>
 

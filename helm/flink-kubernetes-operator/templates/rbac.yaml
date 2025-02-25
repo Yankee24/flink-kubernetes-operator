@@ -30,7 +30,14 @@ rules:
       - configmaps
       - secrets
     verbs:
-      - "*"
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+      - deletecollection
 {{- if .Values.rbac.nodesRule.create }}
   - apiGroups:
     - ""
@@ -46,29 +53,85 @@ rules:
       - deployments/finalizers
       - replicasets
     verbs:
-      - "*"
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - apps
+    resources:
+      - deployments/scale
+    verbs:
+      - get
+      - update
+      - patch
   - apiGroups:
       - extensions
     resources:
       - deployments
       - ingresses
     verbs:
-      - "*"
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
   - apiGroups:
       - flink.apache.org
     resources:
       - flinkdeployments
-      - flinkdeployments/status
+      - flinkdeployments/finalizers
       - flinksessionjobs
-      - flinksessionjobs/status
+      - flinksessionjobs/finalizers
+      - flinkstatesnapshots
+      - flinkstatesnapshots/finalizers
     verbs:
-      - "*"
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - flink.apache.org
+    resources:
+      - flinkdeployments/status
+      - flinksessionjobs/status
+      - flinkstatesnapshots/status
+    verbs:
+      - get
+      - update
+      - patch
   - apiGroups:
       - networking.k8s.io
     resources:
       - ingresses
     verbs:
-      - "*"
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
 {{- end }}
 
 {{/*
@@ -82,14 +145,26 @@ rules:
       - pods
       - configmaps
     verbs:
-      - '*'
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
   - apiGroups:
       - apps
     resources:
       - deployments
       - deployments/finalizers
     verbs:
-      - '*'
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
 {{- end }}
 
 ---
@@ -162,6 +237,49 @@ subjects:
     namespace: {{ . }}
 {{- end }}
 ---
+{{- end }}
+{{/*
+Give operator the ability to operate on leases in the release namespace
+*/}}
+{{- if and .Values.rbac.operatorRole.create (not (has .Release.Namespace .Values.watchNamespaces)) }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "flink-operator.roleName" $ }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flink-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+{{- end }}
+---
+{{- if and .Values.rbac.operatorRole.create (not (has .Release.Namespace .Values.watchNamespaces)) }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "flink-operator.roleBindingName" $ }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "flink-operator.labels" $ | nindent 4 }}
+roleRef:
+  kind: Role
+  name: {{ include "flink-operator.roleName" $ }}
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "flink-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
 {{- end }}
 {{ else }}
 {{/*

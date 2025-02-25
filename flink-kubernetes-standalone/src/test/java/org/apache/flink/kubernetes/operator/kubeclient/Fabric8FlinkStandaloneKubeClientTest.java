@@ -26,26 +26,29 @@ import org.apache.flink.kubernetes.operator.kubeclient.factory.StandaloneKuberne
 import org.apache.flink.kubernetes.operator.kubeclient.parameters.StandaloneKubernetesJobManagerParameters;
 import org.apache.flink.kubernetes.operator.kubeclient.parameters.StandaloneKubernetesTaskManagerParameters;
 import org.apache.flink.kubernetes.operator.kubeclient.utils.TestUtils;
-import org.apache.flink.util.concurrent.Executors;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.apps.Deployment;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.client.Config;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.client.ConfigBuilder;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.client.DefaultKubernetesClient;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.client.NamespacedKubernetesClient;
 
-import io.fabric8.kubernetes.api.model.apps.Deployment;
-import io.fabric8.kubernetes.client.NamespacedKubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.fabric8.kubernetes.client.server.mock.KubernetesMockServer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.Executors;
 
+import static org.apache.flink.kubernetes.operator.kubeclient.utils.TestUtils.TEST_NAMESPACE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-/** @link Fabric8FlinkStandaloneKubeClient unit tests */
-@EnableKubernetesMockClient(crud = true)
+/**
+ * @link Fabric8FlinkStandaloneKubeClient unit tests
+ */
+@EnableKubernetesMockClient(crud = true, https = false)
 public class Fabric8FlinkStandaloneKubeClientTest {
-    private static final String NAMESPACE = "test";
-
-    KubernetesMockServer mockServer;
-    protected NamespacedKubernetesClient kubernetesClient;
+    KubernetesMockServer mockWebServer;
     private FlinkStandaloneKubeClient flinkKubeClient;
     private StandaloneKubernetesTaskManagerParameters taskManagerParameters;
     private Deployment tmDeployment;
@@ -55,11 +58,10 @@ public class Fabric8FlinkStandaloneKubeClientTest {
     @BeforeEach
     public final void setup() {
         flinkConfig = TestUtils.createTestFlinkConfig();
-        kubernetesClient = mockServer.createClient();
 
         flinkKubeClient =
                 new Fabric8FlinkStandaloneKubeClient(
-                        flinkConfig, kubernetesClient, Executors.newDirectExecutorService());
+                        flinkConfig, getClient(), Executors.newSingleThreadScheduledExecutor());
         clusterSpecification = TestUtils.createClusterSpecification();
 
         taskManagerParameters =
@@ -73,9 +75,8 @@ public class Fabric8FlinkStandaloneKubeClientTest {
     @Test
     public void testCreateTaskManagerDeployment() {
         flinkKubeClient.createTaskManagerDeployment(tmDeployment);
-
         final List<Deployment> resultedDeployments =
-                kubernetesClient.apps().deployments().inNamespace(NAMESPACE).list().getItems();
+                getClient().apps().deployments().inNamespace(TEST_NAMESPACE).list().getItems();
         assertEquals(1, resultedDeployments.size());
     }
 
@@ -92,13 +93,22 @@ public class Fabric8FlinkStandaloneKubeClientTest {
         flinkKubeClient.createTaskManagerDeployment(tmDeployment);
 
         List<Deployment> resultedDeployments =
-                kubernetesClient.apps().deployments().inNamespace(NAMESPACE).list().getItems();
+                getClient().apps().deployments().inNamespace(TEST_NAMESPACE).list().getItems();
         assertEquals(2, resultedDeployments.size());
 
         flinkKubeClient.stopAndCleanupCluster(taskManagerParameters.getClusterId());
 
         resultedDeployments =
-                kubernetesClient.apps().deployments().inNamespace(NAMESPACE).list().getItems();
+                getClient().apps().deployments().inNamespace(TEST_NAMESPACE).list().getItems();
         assertEquals(0, resultedDeployments.size());
+    }
+
+    private NamespacedKubernetesClient getClient() {
+        var config =
+                new ConfigBuilder(Config.empty())
+                        .withMasterUrl(mockWebServer.url("/").toString())
+                        .withHttp2Disable(true)
+                        .build();
+        return new DefaultKubernetesClient(config).inNamespace(TEST_NAMESPACE);
     }
 }

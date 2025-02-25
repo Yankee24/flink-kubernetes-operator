@@ -37,6 +37,9 @@ With these two Custom Resources, we can support two different operational models
 - Flink application managed by the `FlinkDeployment`
 - Empty Flink session managed by the `FlinkDeployment` + multiple jobs managed by the `FlinkSessionJobs`. The operations on the session jobs are independent of each other.
 
+To help managing snapshots, there is another CR called FlinkStateSnapshot. This can be created by the operator in case of periodic and upgrade savepoints/checkpoints, or manually by the user to trigger a savepoint/checkpoint for a job.
+FlinkStateSnapshots will always have a FlinkDeployment or FlinkSessionJob linked to them in their spec.
+
 ## FlinkDeployment
 
 FlinkDeployment objects are defined in YAML format by the user and must contain the following required fields:
@@ -85,9 +88,9 @@ The spec contains all the information the operator need to deploy and manage you
 
 Most deployments will define at least the following fields:
  - `image` : Docker used to run Flink job and task manager processes
- - `flinkVersion` : Flink version used in the image (`v1_13`, `v1_14`, `v1_15`...)
+ - `flinkVersion` : Flink version used in the image (`v1_15`, `v1_16`, `v1_17`, `v1_18`, ...)
  - `serviceAccount` : Kubernetes service account used by the Flink pods
- - `taskManager, jobManager` : Job and Task manager pod resource specs (cpu, memory, etc.)
+ - `taskManager, jobManager` : Job and Task manager pod resource specs (cpu, memory, ephemeralStorage)
  - `flinkConfiguration` : Map of Flink configuration overrides such as HA and checkpointing configs
  - `job` : Job Spec for Application deployments
 
@@ -114,8 +117,8 @@ metadata:
   namespace: default
   name: basic-example
 spec:
-  image: flink:1.15
-  flinkVersion: v1_15
+  image: flink:1.20
+  flinkVersion: v1_20
   flinkConfiguration:
     taskmanager.numberOfTaskSlots: "2"
   serviceAccount: flink
@@ -149,6 +152,30 @@ For Session clusters the operator only provides very basic management and monito
  - Monitor overall cluster health
  - Stop / Delete Session cluster
 
+### Cluster Deployment Modes
+On-top of the deployment types the Flink Kubernetes Operator also supports two modes of deployments: **Native** and **Standalone**
+
+Native cluster deployment is the default deployment mode and uses Flink's built in integration with Kubernetes when deploying the cluster. This integration means the Flink cluster communicates directly with Kubernetes and allows it to manage Kubernetes resources, e.g. dynamically allocate and de-allocate TaskManager pods.
+
+For standard Operator use running your own Flink Jobs Native mode is recommended.
+
+Standalone cluster deployment simply uses Kubernetes as an orchestration platform that the Flink cluster is running on. Flink is unaware that it is running on Kubernetes and therefore all Kubernetes resources need to be managed externally, by the Kubernetes Operator.
+
+In Standalone mode the Flink cluster doesn't have access to the Kubernetes cluster so this can increase security. If unknown or external code is being ran on the Flink cluster then Standalone mode adds another layer of security.
+
+The deployment mode can be set using the `mode` field in the deployment spec.
+
+```yaml
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+...
+spec:
+  ...
+  mode: standalone
+
+
+```
+
 ## FlinkSessionJob
 
 The FlinkSessionJob have a similar structure to FlinkDeployment with the following required fields:
@@ -161,7 +188,7 @@ metadata:
 spec:
   deploymentName: basic-session-cluster
   job:
-    jarURI: https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.15.1/flink-examples-streaming_2.12-1.15.1-TopSpeedWindowing.jar
+    jarURI: https://repo1.maven.org/maven2/org/apache/flink/flink-examples-streaming_2.12/1.16.1/flink-examples-streaming_2.12-1.16.1-TopSpeedWindowing.jar
     parallelism: 4
     upgradeMode: stateless
 ```
@@ -183,17 +210,15 @@ For example, to support the hadoop fs resource:
 ```shell script
 FROM apache/flink-kubernetes-operator
 ENV FLINK_PLUGINS_DIR=/opt/flink/plugins
-COPY flink-hadoop-fs-1.15-SNAPSHOT.jar $FLINK_PLUGINS_DIR/hadoop-fs/
+COPY flink-hadoop-fs-1.19-SNAPSHOT.jar $FLINK_PLUGINS_DIR/hadoop-fs/
 ```
 
-### Limitations
-
-- The LastState UpgradeMode have not been supported.
+Alternatively, if you use helm to install flink-kubernetes-operator, it allows you to specify a postStart hook to download the required plugins.
 
 ## Further information
 
+ - [Snapshots]({{< ref "docs/custom-resource/snapshots" >}})
  - [Job Management and Stateful upgrades]({{< ref "docs/custom-resource/job-management" >}})
  - [Deployment customization and pod templates]({{< ref "docs/custom-resource/pod-template" >}})
  - [Full Reference]({{< ref "docs/custom-resource/reference" >}})
  - [Examples](https://github.com/apache/flink-kubernetes-operator/tree/main/examples)
-

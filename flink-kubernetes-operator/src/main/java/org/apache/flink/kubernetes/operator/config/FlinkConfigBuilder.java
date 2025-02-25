@@ -17,6 +17,7 @@
 
 package org.apache.flink.kubernetes.operator.config;
 
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.client.deployment.application.ApplicationConfiguration;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
@@ -24,21 +25,25 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.CoreOptions;
 import org.apache.flink.configuration.DeploymentOptions;
 import org.apache.flink.configuration.DeploymentOptionsInternal;
+import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.configuration.KubernetesDeploymentTarget;
-import org.apache.flink.kubernetes.operator.crd.FlinkDeployment;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkDeploymentSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.FlinkVersion;
-import org.apache.flink.kubernetes.operator.crd.spec.JobSpec;
-import org.apache.flink.kubernetes.operator.crd.spec.KubernetesDeploymentMode;
-import org.apache.flink.kubernetes.operator.crd.spec.Resource;
-import org.apache.flink.kubernetes.operator.crd.spec.UpgradeMode;
+import org.apache.flink.kubernetes.operator.api.CrdConstants;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
+import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
+import org.apache.flink.kubernetes.operator.api.spec.JobSpec;
+import org.apache.flink.kubernetes.operator.api.spec.KubernetesDeploymentMode;
+import org.apache.flink.kubernetes.operator.api.spec.Resource;
+import org.apache.flink.kubernetes.operator.api.spec.UpgradeMode;
+import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.kubernetes.operator.standalone.StandaloneKubernetesConfigOptionsInternal;
 import org.apache.flink.kubernetes.operator.utils.FlinkUtils;
+import org.apache.flink.kubernetes.utils.Constants;
 import org.apache.flink.runtime.jobgraph.SavepointConfigOptions;
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
@@ -46,8 +51,12 @@ import org.apache.flink.streaming.api.environment.ExecutionCheckpointingOptions;
 import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.StringUtils;
 
-import io.fabric8.kubernetes.api.model.Pod;
-import io.fabric8.kubernetes.client.internal.SerializationUtils;
+import io.fabric8.kubernetes.api.model.Container;
+import io.fabric8.kubernetes.api.model.PodSpec;
+import io.fabric8.kubernetes.api.model.PodTemplateSpec;
+import io.fabric8.kubernetes.api.model.Quantity;
+import io.fabric8.kubernetes.api.model.ResourceRequirements;
+import io.fabric8.kubernetes.client.utils.Serialization;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,6 +68,7 @@ import java.nio.file.Files;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Optional;
 
 import static org.apache.flink.configuration.DeploymentOptions.SHUTDOWN_ON_APPLICATION_FINISH;
 import static org.apache.flink.configuration.DeploymentOptions.SUBMIT_FAILED_JOB_ON_APPLICATION_ERROR;
@@ -89,28 +99,31 @@ public class FlinkConfigBuilder {
     private final FlinkDeploymentSpec spec;
     private final Configuration effectiveConfig;
 
-    protected FlinkConfigBuilder(FlinkDeployment deployment, Configuration flinkConfig) {
+    protected FlinkConfigBuilder(FlinkDeployment deployment, Configuration flinkConf) {
         this(
                 deployment.getMetadata().getNamespace(),
                 deployment.getMetadata().getName(),
                 deployment.getSpec(),
-                flinkConfig);
+                flinkConf);
     }
 
     protected FlinkConfigBuilder(
-            String namespace,
-            String clusterId,
-            FlinkDeploymentSpec spec,
-            Configuration flinkConfig) {
+            String namespace, String clusterId, FlinkDeploymentSpec spec, Configuration flinkConf) {
         this.namespace = namespace;
         this.clusterId = clusterId;
         this.spec = spec;
-        this.effectiveConfig = new Configuration(flinkConfig);
+        this.effectiveConfig = flinkConf;
     }
 
     protected FlinkConfigBuilder applyImage() {
         if (!StringUtils.isNullOrWhitespaceOnly(spec.getImage())) {
-            effectiveConfig.set(KubernetesConfigOptions.CONTAINER_IMAGE, spec.getImage());
+            String configKey;
+            if (spec.getFlinkVersion().isEqualOrNewer(FlinkVersion.v1_17)) {
+                configKey = KubernetesConfigOptions.CONTAINER_IMAGE.key();
+            } else {
+                configKey = "kubernetes.container.image";
+            }
+            effectiveConfig.setString(configKey, spec.getImage());
         }
         return this;
     }
@@ -135,35 +148,41 @@ public class FlinkConfigBuilder {
                 REST_SERVICE_EXPOSED_TYPE, KubernetesConfigOptions.ServiceExposedType.ClusterIP);
         // Set 'web.cancel.enable' to false to avoid users accidentally cancelling jobs.
         setDefaultConf(CANCEL_ENABLE, false);
-
-        if (spec.getJob() != null) {
-            // Set 'pipeline.name' to resource name by default for application deployments.
-            setDefaultConf(PipelineOptions.NAME, clusterId);
-
-            // With last-state upgrade mode, set the default value of
-            // 'execution.checkpointing.interval'
-            // to 5 minutes when HA is enabled.
-            if (spec.getJob().getUpgradeMode() == UpgradeMode.LAST_STATE) {
-                setDefaultConf(
-                        ExecutionCheckpointingOptions.CHECKPOINTING_INTERVAL,
-                        DEFAULT_CHECKPOINTING_INTERVAL);
-            }
-
-            // We need to keep the application clusters around for proper operator behaviour
-            if (spec.getFlinkVersion().isNewerVersionThan(FlinkVersion.v1_14)) {
-                effectiveConfig.set(SHUTDOWN_ON_APPLICATION_FINISH, false);
-            }
-            if (HighAvailabilityMode.isHighAvailabilityModeActivated(effectiveConfig)) {
-                setDefaultConf(SUBMIT_FAILED_JOB_ON_APPLICATION_ERROR, true);
-            }
-
-            setDefaultConf(
-                    ExecutionCheckpointingOptions.EXTERNALIZED_CHECKPOINT,
-                    CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
-        }
-
         effectiveConfig.set(FLINK_VERSION, spec.getFlinkVersion());
         return this;
+    }
+
+    protected static void applyJobConfig(String name, Configuration conf, JobSpec jobSpec) {
+        // Set 'pipeline.name' to resource name by default for application deployments.
+        setDefaultConf(conf, PipelineOptions.NAME, name);
+
+        // With last-state upgrade mode, set the default value of
+        // 'execution.checkpointing.interval'
+        // to 5 minutes when HA is enabled.
+        if (jobSpec.getUpgradeMode() == UpgradeMode.LAST_STATE) {
+            setDefaultConf(
+                    conf,
+                    ExecutionCheckpointingOptions.CHECKPOINTING_INTERVAL,
+                    DEFAULT_CHECKPOINTING_INTERVAL);
+        }
+        setDefaultConf(
+                conf,
+                ExecutionCheckpointingOptions.EXTERNALIZED_CHECKPOINT,
+                CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
+
+        if (jobSpec.getAllowNonRestoredState() != null) {
+            conf.set(
+                    SavepointConfigOptions.SAVEPOINT_IGNORE_UNCLAIMED_STATE,
+                    jobSpec.getAllowNonRestoredState());
+        }
+
+        if (jobSpec.getEntryClass() != null) {
+            conf.set(ApplicationConfiguration.APPLICATION_MAIN_CLASS, jobSpec.getEntryClass());
+        }
+
+        if (jobSpec.getArgs() != null) {
+            conf.set(ApplicationConfiguration.APPLICATION_ARGS, Arrays.asList(jobSpec.getArgs()));
+        }
     }
 
     protected FlinkConfigBuilder applyLogConfiguration() throws IOException {
@@ -177,22 +196,56 @@ public class FlinkConfigBuilder {
         return this;
     }
 
-    protected FlinkConfigBuilder applyCommonPodTemplate() throws IOException {
-        if (spec.getPodTemplate() != null) {
-            effectiveConfig.set(
-                    KubernetesConfigOptions.KUBERNETES_POD_TEMPLATE,
-                    createTempFile(spec.getPodTemplate()));
-        }
-        return this;
-    }
+    protected FlinkConfigBuilder applyPodTemplate() throws IOException {
+        PodTemplateSpec commonPodTemplate = spec.getPodTemplate();
+        boolean mergeByName =
+                effectiveConfig.get(KubernetesOperatorConfigOptions.POD_TEMPLATE_MERGE_BY_NAME);
 
-    protected FlinkConfigBuilder applyIngressDomain() {
-        // Web UI
-        if (spec.getIngress() != null) {
-            effectiveConfig.set(
-                    REST_SERVICE_EXPOSED_TYPE,
-                    KubernetesConfigOptions.ServiceExposedType.ClusterIP);
+        PodTemplateSpec jmPodTemplate;
+        if (spec.getJobManager() != null) {
+            jmPodTemplate =
+                    mergePodTemplates(
+                            commonPodTemplate, spec.getJobManager().getPodTemplate(), mergeByName);
+
+            jmPodTemplate =
+                    applyResourceToPodTemplate(jmPodTemplate, spec.getJobManager().getResource());
+        } else {
+            jmPodTemplate = ReconciliationUtils.clone(commonPodTemplate);
         }
+
+        if (effectiveConfig.get(
+                KubernetesOperatorConfigOptions.OPERATOR_JM_STARTUP_PROBE_ENABLED)) {
+            if (jmPodTemplate == null) {
+                jmPodTemplate = new PodTemplateSpec();
+            }
+            FlinkUtils.addStartupProbe(jmPodTemplate);
+        }
+
+        String jmTemplateFile = null;
+        if (jmPodTemplate != null) {
+            jmTemplateFile = createTempFile(jmPodTemplate);
+            effectiveConfig.set(KubernetesConfigOptions.JOB_MANAGER_POD_TEMPLATE, jmTemplateFile);
+        }
+
+        PodTemplateSpec tmPodTemplate;
+        if (spec.getTaskManager() != null) {
+            tmPodTemplate =
+                    mergePodTemplates(
+                            commonPodTemplate, spec.getTaskManager().getPodTemplate(), mergeByName);
+            tmPodTemplate =
+                    applyResourceToPodTemplate(tmPodTemplate, spec.getTaskManager().getResource());
+        } else {
+            tmPodTemplate = ReconciliationUtils.clone(commonPodTemplate);
+        }
+
+        if (tmPodTemplate != null) {
+            effectiveConfig.set(
+                    KubernetesConfigOptions.TASK_MANAGER_POD_TEMPLATE,
+                    tmPodTemplate.equals(jmPodTemplate)
+                            ? jmTemplateFile
+                            : createTempFile(tmPodTemplate));
+        }
+
         return this;
     }
 
@@ -204,14 +257,9 @@ public class FlinkConfigBuilder {
         return this;
     }
 
-    protected FlinkConfigBuilder applyJobManagerSpec() throws IOException {
+    protected FlinkConfigBuilder applyJobManagerSpec() {
         if (spec.getJobManager() != null) {
             setResource(spec.getJobManager().getResource(), effectiveConfig, true);
-            setPodTemplate(
-                    spec.getPodTemplate(),
-                    spec.getJobManager().getPodTemplate(),
-                    effectiveConfig,
-                    true);
             if (spec.getJobManager().getReplicas() > 0) {
                 effectiveConfig.set(
                         KubernetesConfigOptions.KUBERNETES_JOBMANAGER_REPLICAS,
@@ -221,15 +269,9 @@ public class FlinkConfigBuilder {
         return this;
     }
 
-    protected FlinkConfigBuilder applyTaskManagerSpec() throws IOException {
+    protected FlinkConfigBuilder applyTaskManagerSpec() {
         if (spec.getTaskManager() != null) {
             setResource(spec.getTaskManager().getResource(), effectiveConfig, false);
-            setPodTemplate(
-                    spec.getPodTemplate(),
-                    spec.getTaskManager().getPodTemplate(),
-                    effectiveConfig,
-                    false);
-
             if (spec.getTaskManager().getReplicas() != null
                     && spec.getTaskManager().getReplicas() > 0) {
                 effectiveConfig.set(
@@ -259,30 +301,19 @@ public class FlinkConfigBuilder {
             effectiveConfig.set(
                     DeploymentOptions.TARGET, KubernetesDeploymentTarget.APPLICATION.getName());
 
-            if (jobSpec.getJarURI() != null) {
-                final URI uri = new URI(jobSpec.getJarURI());
+            if (deploymentMode == KubernetesDeploymentMode.NATIVE && jobSpec.getJarURI() != null) {
                 effectiveConfig.set(
-                        PipelineOptions.JARS, Collections.singletonList(uri.toString()));
+                        PipelineOptions.JARS,
+                        Collections.singletonList(new URI(jobSpec.getJarURI()).toString()));
             }
-
             effectiveConfig.set(CoreOptions.DEFAULT_PARALLELISM, getParallelism());
 
-            if (jobSpec.getAllowNonRestoredState() != null) {
-                effectiveConfig.set(
-                        SavepointConfigOptions.SAVEPOINT_IGNORE_UNCLAIMED_STATE,
-                        jobSpec.getAllowNonRestoredState());
-            }
+            // We need to keep the application clusters around for proper operator behaviour
+            effectiveConfig.set(SHUTDOWN_ON_APPLICATION_FINISH, false);
+            setDefaultConf(SUBMIT_FAILED_JOB_ON_APPLICATION_ERROR, true);
 
-            if (jobSpec.getEntryClass() != null) {
-                effectiveConfig.set(
-                        ApplicationConfiguration.APPLICATION_MAIN_CLASS, jobSpec.getEntryClass());
-            }
-
-            if (jobSpec.getArgs() != null) {
-                effectiveConfig.set(
-                        ApplicationConfiguration.APPLICATION_ARGS,
-                        Arrays.asList(jobSpec.getArgs()));
-            }
+            // Generic shared job config logic
+            applyJobConfig(clusterId, effectiveConfig, jobSpec);
         } else {
             effectiveConfig.set(
                     DeploymentOptions.TARGET, KubernetesDeploymentTarget.SESSION.getName());
@@ -332,7 +363,22 @@ public class FlinkConfigBuilder {
                     * effectiveConfig.get(TaskManagerOptions.NUM_TASK_SLOTS);
         }
 
+        Optional<Integer> maxOverrideParallelism = getMaxParallelismFromOverrideConfig();
+        if (maxOverrideParallelism.isPresent() && maxOverrideParallelism.get() > 0) {
+            return maxOverrideParallelism.get();
+        }
+
         return spec.getJob().getParallelism();
+    }
+
+    private Optional<Integer> getMaxParallelismFromOverrideConfig() {
+        return effectiveConfig
+                .getOptional(PipelineOptions.PARALLELISM_OVERRIDES)
+                .flatMap(
+                        overrides ->
+                                overrides.values().stream()
+                                        .map(Integer::valueOf)
+                                        .max(Integer::compareTo));
     }
 
     protected Configuration build() {
@@ -340,6 +386,9 @@ public class FlinkConfigBuilder {
         // Set cluster config
         effectiveConfig.setString(KubernetesConfigOptions.NAMESPACE, namespace);
         effectiveConfig.setString(KubernetesConfigOptions.CLUSTER_ID, clusterId);
+        if (HighAvailabilityMode.isHighAvailabilityModeActivated(effectiveConfig)) {
+            effectiveConfig.setString(HighAvailabilityOptions.HA_CLUSTER_ID, clusterId);
+        }
         return effectiveConfig;
     }
 
@@ -352,8 +401,7 @@ public class FlinkConfigBuilder {
                 .applyImage()
                 .applyImagePullPolicy()
                 .applyServiceAccount()
-                .applyCommonPodTemplate()
-                .applyIngressDomain()
+                .applyPodTemplate()
                 .applyJobManagerSpec()
                 .applyTaskManagerSpec()
                 .applyJobOrSessionSpec()
@@ -361,50 +409,138 @@ public class FlinkConfigBuilder {
     }
 
     private <T> void setDefaultConf(ConfigOption<T> option, T value) {
-        if (!effectiveConfig.contains(option)) {
-            effectiveConfig.set(option, value);
+        setDefaultConf(effectiveConfig, option, value);
+    }
+
+    private static <T> void setDefaultConf(Configuration conf, ConfigOption<T> option, T value) {
+        if (!conf.contains(option)) {
+            conf.set(option, value);
         }
     }
 
-    private static void setResource(
-            Resource resource, Configuration effectiveConfig, boolean isJM) {
+    private void setResource(Resource resource, Configuration effectiveConfig, boolean isJM) {
         if (resource != null) {
-            final ConfigOption<MemorySize> memoryConfigOption =
+            var memoryConfigOption =
                     isJM
                             ? JobManagerOptions.TOTAL_PROCESS_MEMORY
                             : TaskManagerOptions.TOTAL_PROCESS_MEMORY;
-            final ConfigOption<Double> cpuConfigOption =
-                    isJM
-                            ? KubernetesConfigOptions.JOB_MANAGER_CPU
-                            : KubernetesConfigOptions.TASK_MANAGER_CPU;
             if (resource.getMemory() != null) {
-                effectiveConfig.setString(memoryConfigOption.key(), resource.getMemory());
+                effectiveConfig.setString(
+                        memoryConfigOption.key(), parseResourceMemoryString(resource.getMemory()));
             }
-            if (resource.getCpu() != null) {
-                effectiveConfig.setDouble(cpuConfigOption.key(), resource.getCpu());
-            }
+
+            configureCpu(resource, effectiveConfig, isJM);
         }
     }
 
-    private static void setPodTemplate(
-            Pod basicPod, Pod appendPod, Configuration effectiveConfig, boolean isJM)
-            throws IOException {
+    public static String parseResourceMemoryString(String memory) {
+        try {
+            return MemorySize.parse(memory).toString();
+        } catch (IllegalArgumentException e) {
+            var memoryQuantity = formatMemoryStringForK8sSpec(memory);
+            return Quantity.parse(memoryQuantity).getNumericalAmount() + "";
+        }
+    }
 
-        if (basicPod == null && appendPod == null) {
+    private static String formatMemoryStringForK8sSpec(String memory) {
+        var memoryQuantity = memory.trim().replaceAll("\\s", "").toUpperCase();
+        if (memoryQuantity.endsWith("B")) {
+            memoryQuantity = memoryQuantity.substring(0, memoryQuantity.length() - 1);
+        }
+        if (memoryQuantity.endsWith("I")) {
+            memoryQuantity = memoryQuantity.substring(0, memoryQuantity.length() - 1) + "i";
+        }
+        return memoryQuantity;
+    }
+
+    private void configureCpu(Resource resource, Configuration conf, boolean isJM) {
+        if (resource.getCpu() == null) {
             return;
         }
 
-        // Avoid to create temporary pod template files for JobManager and TaskManager if it is not
-        // configured explicitly via .spec.JobManagerSpec.podTemplate or
-        // .spec.TaskManagerSpec.podTemplate.
-        if (appendPod != null) {
-            final ConfigOption<String> podConfigOption =
-                    isJM
-                            ? KubernetesConfigOptions.JOB_MANAGER_POD_TEMPLATE
-                            : KubernetesConfigOptions.TASK_MANAGER_POD_TEMPLATE;
-            effectiveConfig.setString(
-                    podConfigOption, createTempFile(mergePodTemplates(basicPod, appendPod)));
+        boolean newConfKeys = spec.getFlinkVersion().isEqualOrNewer(FlinkVersion.v1_17);
+        String configKey = null;
+        if (isJM) {
+            // Set new config all the time to simplify reading side
+            conf.setDouble(KubernetesConfigOptions.JOB_MANAGER_CPU.key(), resource.getCpu());
+            if (!newConfKeys) {
+                configKey = "kubernetes.jobmanager.cpu";
+            }
+        } else {
+            // Set new config all the time to simplify reading side
+            conf.setDouble(KubernetesConfigOptions.TASK_MANAGER_CPU.key(), resource.getCpu());
+            if (!newConfKeys) {
+                configKey = "kubernetes.taskmanager.cpu";
+            }
         }
+        if (configKey != null) {
+            conf.setDouble(configKey, resource.getCpu());
+        }
+    }
+
+    @VisibleForTesting
+    protected static PodTemplateSpec applyResourceToPodTemplate(
+            PodTemplateSpec podTemplate, Resource resource) {
+        if (resource == null
+                || StringUtils.isNullOrWhitespaceOnly(resource.getEphemeralStorage())) {
+            return podTemplate;
+        }
+
+        if (podTemplate == null) {
+            var newPodTemplate = new PodTemplateSpec();
+            newPodTemplate.setSpec(createPodSpecWithResource(resource));
+            return newPodTemplate;
+        } else if (podTemplate.getSpec() == null) {
+            podTemplate.setSpec(createPodSpecWithResource(resource));
+            return podTemplate;
+        } else {
+            boolean hasMainContainer = false;
+            for (Container container : podTemplate.getSpec().getContainers()) {
+                if (container.getName().equals(Constants.MAIN_CONTAINER_NAME)) {
+                    decorateContainerWithEphemeralStorage(
+                            container, resource.getEphemeralStorage());
+                    hasMainContainer = true;
+                }
+            }
+
+            if (!hasMainContainer) {
+                podTemplate
+                        .getSpec()
+                        .getContainers()
+                        .add(
+                                decorateContainerWithEphemeralStorage(
+                                        new Container(), resource.getEphemeralStorage()));
+            }
+        }
+
+        return podTemplate;
+    }
+
+    private static PodSpec createPodSpecWithResource(Resource resource) {
+        PodSpec spec = new PodSpec();
+        spec.getContainers()
+                .add(
+                        decorateContainerWithEphemeralStorage(
+                                new Container(), resource.getEphemeralStorage()));
+
+        return spec;
+    }
+
+    private static Container decorateContainerWithEphemeralStorage(
+            Container container, String ephemeralStorage) {
+        container.setName(Constants.MAIN_CONTAINER_NAME);
+        ResourceRequirements resourceRequirements =
+                container.getResources() == null
+                        ? new ResourceRequirements()
+                        : container.getResources();
+        resourceRequirements
+                .getLimits()
+                .put(CrdConstants.EPHEMERAL_STORAGE, Quantity.parse(ephemeralStorage));
+        resourceRequirements
+                .getRequests()
+                .put(CrdConstants.EPHEMERAL_STORAGE, Quantity.parse(ephemeralStorage));
+        container.setResources(resourceRequirements);
+        return container;
     }
 
     private static String createLogConfigFiles(String log4jConf, String logbackConf)
@@ -420,21 +556,16 @@ public class FlinkConfigBuilder {
             File logbackConfFile = new File(tmpDir.getAbsolutePath(), CONFIG_FILE_LOGBACK_NAME);
             Files.write(logbackConfFile.toPath(), logbackConf.getBytes());
         }
-        tmpDir.deleteOnExit();
         return tmpDir.getAbsolutePath();
     }
 
-    private static String createTempFile(Pod podTemplate) throws IOException {
+    private static String createTempFile(PodTemplateSpec podTemplate) throws IOException {
         final File tmp = File.createTempFile(GENERATED_FILE_PREFIX + "podTemplate_", ".yaml");
-        Files.write(tmp.toPath(), SerializationUtils.dumpAsYaml(podTemplate).getBytes());
-        tmp.deleteOnExit();
+        Files.write(tmp.toPath(), Serialization.asYaml(podTemplate).getBytes());
         return tmp.getAbsolutePath();
     }
 
     protected static void cleanupTmpFiles(Configuration configuration) {
-        configuration
-                .getOptional(KubernetesConfigOptions.KUBERNETES_POD_TEMPLATE)
-                .ifPresent(FlinkConfigBuilder::deleteSilentlyIfGenerated);
         configuration
                 .getOptional(KubernetesConfigOptions.JOB_MANAGER_POD_TEMPLATE)
                 .ifPresent(FlinkConfigBuilder::deleteSilentlyIfGenerated);

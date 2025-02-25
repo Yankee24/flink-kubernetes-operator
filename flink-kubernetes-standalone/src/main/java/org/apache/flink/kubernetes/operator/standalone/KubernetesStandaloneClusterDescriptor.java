@@ -32,8 +32,10 @@ import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.kubernetes.KubernetesClusterDescriptor;
+import org.apache.flink.kubernetes.artifact.DefaultKubernetesArtifactUploader;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.kubeclient.Endpoint;
+import org.apache.flink.kubernetes.kubeclient.FlinkKubeClientFactory;
 import org.apache.flink.kubernetes.kubeclient.FlinkPod;
 import org.apache.flink.kubernetes.kubeclient.KubernetesJobManagerSpecification;
 import org.apache.flink.kubernetes.operator.kubeclient.FlinkStandaloneKubeClient;
@@ -41,6 +43,7 @@ import org.apache.flink.kubernetes.operator.kubeclient.factory.StandaloneKuberne
 import org.apache.flink.kubernetes.operator.kubeclient.factory.StandaloneKubernetesTaskManagerFactory;
 import org.apache.flink.kubernetes.operator.kubeclient.parameters.StandaloneKubernetesJobManagerParameters;
 import org.apache.flink.kubernetes.operator.kubeclient.parameters.StandaloneKubernetesTaskManagerParameters;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.apps.Deployment;
 import org.apache.flink.kubernetes.utils.Constants;
 import org.apache.flink.kubernetes.utils.KubernetesUtils;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServicesUtils;
@@ -48,7 +51,6 @@ import org.apache.flink.runtime.highavailability.nonha.standalone.StandaloneClie
 import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
 import org.apache.flink.runtime.rpc.AddressResolution;
 
-import io.fabric8.kubernetes.api.model.apps.Deployment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -67,15 +69,18 @@ public class KubernetesStandaloneClusterDescriptor extends KubernetesClusterDesc
 
     private final Configuration flinkConfig;
 
-    private final FlinkStandaloneKubeClient client;
+    private final FlinkStandaloneKubeClient standaloneKubeClient;
 
     private final String clusterId;
 
     public KubernetesStandaloneClusterDescriptor(
             Configuration flinkConfig, FlinkStandaloneKubeClient client) {
-        super(flinkConfig, client);
+        super(
+                flinkConfig,
+                FlinkKubeClientFactory.getInstance(),
+                new DefaultKubernetesArtifactUploader());
         this.flinkConfig = checkNotNull(flinkConfig);
-        this.client = checkNotNull(client);
+        this.standaloneKubeClient = checkNotNull(client);
         this.clusterId =
                 checkNotNull(
                         flinkConfig.getString(KubernetesConfigOptions.CLUSTER_ID),
@@ -149,8 +154,8 @@ public class KubernetesStandaloneClusterDescriptor extends KubernetesClusterDesc
             KubernetesJobManagerSpecification jmSpec = getJobManagerSpec(clusterSpecification);
             Deployment tmDeployment = getTaskManagerDeployment(clusterSpecification);
 
-            client.createJobManagerComponent(jmSpec);
-            client.createTaskManagerDeployment(tmDeployment);
+            standaloneKubeClient.createJobManagerComponent(jmSpec);
+            standaloneKubeClient.createTaskManagerDeployment(tmDeployment);
 
             return createClusterClientProvider(clusterId);
         } catch (Exception e) {
@@ -158,7 +163,7 @@ public class KubernetesStandaloneClusterDescriptor extends KubernetesClusterDesc
                 LOG.warn(
                         "Failed to create the Kubernetes cluster \"{}\", try to clean up the residual resources.",
                         clusterId);
-                client.stopAndCleanupCluster(clusterId);
+                standaloneKubeClient.stopAndCleanupCluster(clusterId);
             } catch (Exception e1) {
                 LOG.info(
                         "Failed to stop and clean up the Kubernetes cluster \"{}\".",
@@ -181,7 +186,9 @@ public class KubernetesStandaloneClusterDescriptor extends KubernetesClusterDesc
                         .map(
                                 file ->
                                         KubernetesUtils.loadPodFromTemplateFile(
-                                                client, file, Constants.MAIN_CONTAINER_NAME))
+                                                standaloneKubeClient,
+                                                file,
+                                                Constants.MAIN_CONTAINER_NAME))
                         .orElse(new FlinkPod.Builder().build());
 
         return StandaloneKubernetesJobManagerFactory.buildKubernetesJobManagerSpecification(
@@ -198,7 +205,9 @@ public class KubernetesStandaloneClusterDescriptor extends KubernetesClusterDesc
                         .map(
                                 file ->
                                         KubernetesUtils.loadPodFromTemplateFile(
-                                                client, file, Constants.MAIN_CONTAINER_NAME))
+                                                standaloneKubeClient,
+                                                file,
+                                                Constants.MAIN_CONTAINER_NAME))
                         .orElse(new FlinkPod.Builder().build());
 
         return StandaloneKubernetesTaskManagerFactory.buildKubernetesTaskManagerDeployment(
@@ -209,7 +218,7 @@ public class KubernetesStandaloneClusterDescriptor extends KubernetesClusterDesc
         return () -> {
             final Configuration configuration = new Configuration(flinkConfig);
 
-            final Optional<Endpoint> restEndpoint = client.getRestEndpoint(clusterId);
+            final Optional<Endpoint> restEndpoint = standaloneKubeClient.getRestEndpoint(clusterId);
 
             if (restEndpoint.isPresent()) {
                 configuration.setString(RestOptions.ADDRESS, restEndpoint.get().getAddress());

@@ -24,24 +24,26 @@ import org.apache.flink.kubernetes.kubeclient.KubernetesJobManagerSpecification;
 import org.apache.flink.kubernetes.kubeclient.decorators.ExternalServiceDecorator;
 import org.apache.flink.kubernetes.kubeclient.decorators.FlinkConfMountDecorator;
 import org.apache.flink.kubernetes.kubeclient.decorators.InternalServiceDecorator;
+import org.apache.flink.kubernetes.kubeclient.resources.KubernetesOwnerReference;
 import org.apache.flink.kubernetes.kubeclient.services.HeadlessClusterIPService;
 import org.apache.flink.kubernetes.operator.kubeclient.parameters.ParametersTestBase;
 import org.apache.flink.kubernetes.operator.kubeclient.parameters.StandaloneKubernetesJobManagerParameters;
 import org.apache.flink.kubernetes.operator.kubeclient.utils.TestUtils;
 import org.apache.flink.kubernetes.operator.utils.StandaloneKubernetesUtils;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.ConfigMap;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.Container;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.ContainerPort;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.ContainerPortBuilder;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.HasMetadata;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.ObjectMeta;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.OwnerReference;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.PodSpec;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.Quantity;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.ResourceRequirements;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.Service;
+import org.apache.flink.kubernetes.shaded.io.fabric8.kubernetes.api.model.apps.DeploymentSpec;
 import org.apache.flink.kubernetes.utils.Constants;
 
-import io.fabric8.kubernetes.api.model.ConfigMap;
-import io.fabric8.kubernetes.api.model.Container;
-import io.fabric8.kubernetes.api.model.ContainerPort;
-import io.fabric8.kubernetes.api.model.ContainerPortBuilder;
-import io.fabric8.kubernetes.api.model.HasMetadata;
-import io.fabric8.kubernetes.api.model.ObjectMeta;
-import io.fabric8.kubernetes.api.model.PodSpec;
-import io.fabric8.kubernetes.api.model.Quantity;
-import io.fabric8.kubernetes.api.model.ResourceRequirements;
-import io.fabric8.kubernetes.api.model.Service;
-import io.fabric8.kubernetes.api.model.apps.DeploymentSpec;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -60,7 +62,9 @@ import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
-/** @link StandaloneKubernetesJobManagerFactory unit tests */
+/**
+ * @link StandaloneKubernetesJobManagerFactory unit tests
+ */
 public class StandaloneKubernetesJobManagerFactoryTest extends ParametersTestBase {
 
     KubernetesJobManagerSpecification jmSpec;
@@ -92,6 +96,12 @@ public class StandaloneKubernetesJobManagerFactoryTest extends ParametersTestBas
         assertEquals(expectedLabels, deploymentMetadata.getLabels());
 
         assertEquals(userAnnotations, deploymentMetadata.getAnnotations());
+
+        final List<OwnerReference> expectedOwnerReferences =
+                List.of(
+                        KubernetesOwnerReference.fromMap(flinkDeploymentOwnerReference)
+                                .getInternalResource());
+        assertEquals(expectedOwnerReferences, deploymentMetadata.getOwnerReferences());
     }
 
     @Test
@@ -126,7 +136,7 @@ public class StandaloneKubernetesJobManagerFactoryTest extends ParametersTestBas
         assertEquals(1, podSpec.getContainers().size());
         assertEquals(TestUtils.SERVICE_ACCOUNT, podSpec.getServiceAccountName());
         // Config and secret volumes
-        assertEquals(3, podSpec.getVolumes().size());
+        assertEquals(4, podSpec.getVolumes().size());
 
         final Container mainContainer = podSpec.getContainers().get(0);
         assertEquals(Constants.MAIN_CONTAINER_NAME, mainContainer.getName());
@@ -174,7 +184,7 @@ public class StandaloneKubernetesJobManagerFactoryTest extends ParametersTestBas
         assertEquals(
                 String.valueOf(TestUtils.JOB_MANAGER_MEMORY_MB), limits.get("memory").getAmount());
 
-        assertEquals(3, mainContainer.getVolumeMounts().size());
+        assertEquals(4, mainContainer.getVolumeMounts().size());
     }
 
     @Test
